@@ -1,7 +1,7 @@
 '''
     Simple XBMC Download Script
     
-    Lantash MOD
+    Lantash MOD test
     
     Copyright (C) 2013 Sean Poyser (seanpoyser@gmail.com)
     
