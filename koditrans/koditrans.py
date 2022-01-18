@@ -1,9 +1,13 @@
+# See: https://kodi.wiki/view/Add-on_settings_conversion
 
 import re
 import string
 from dataclasses import dataclass, field
+from collections import namedtuple
 from typing import Union
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from itertools import chain
 import argparse
 try:
     # faster implementation
@@ -12,10 +16,36 @@ except ModuleNotFoundError:
     # standard implementation
     from xml.etree import ElementTree as etree
 import polib
+from plural import plural_forms
 
 
 __author__ = 'rysson'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
+
+
+# Monkey Patching
+
+def _BaseFile_metadata_as_entry(self):
+    entry = _real_BaseFile_metadata_as_entry(self)
+    try:
+        comment = self.metadata_comment
+    except AttributeError:
+        pass
+    else:
+        entry.comment = comment
+    return entry
+
+
+_real_BaseFile_metadata_as_entry = polib._BaseFile.metadata_as_entry
+polib._BaseFile.metadata_as_entry = _BaseFile_metadata_as_entry
+
+
+Input = namedtuple('Input', 'path tree')
+
+
+def local_now():
+    tz = timezone(timedelta(seconds=round((datetime.now() - datetime.utcnow()).total_seconds())))
+    return datetime.now(tz)
 
 
 class SafeFormatter(string.Formatter):
@@ -43,19 +73,41 @@ class LabelList(list):
 
     def add(self, label):
         """Add label in new ID, otherwise merge."""
-        for lb in self:
+        for i, lb in enumerate(self):
             if lb.id == label.id:
                 if lb.text is None and label.text is not None and lb.text:
                     lb.text = label.text
                 elif label.text is not None:
                     assert label.text == lb.text
                 lb.nodes |= label.nodes
+                # return i
                 return lb
         self.append(label)
+        # return len(self) - 1
         return label
 
 
-class Translate:
+class NodeLValue:
+    """Pseudo xml-node, points to node and one of old select "lvalues"."""
+
+    def __init__(self, node, *, index):
+        self.node = node
+        self.index = index
+
+    def __getattr__(self, key):
+        return getattr(self.node, key)
+
+    def set(self, key, value):
+        assert key == 'label'
+        lst = self.node.get('lvalues', '').split('|')
+        if len(lst) < self.index:
+            lst.append(value)
+        else:
+            lst[self.index] = value
+        self.node.set('lvalues', '|'.join(lst))
+
+
+class TranslateBase:
     """Whole translate process handler."""
 
     DEF_LANG = {c.partition('_')[0]: c for c in (
@@ -63,15 +115,25 @@ class Translate:
         'el_GR', 'iw_IL', 'hi_IN', 'in_ID', 'ga_IE', 'ja_JP', 'ko_KR', 'ms_MY', 'sr_RS', 'sl_SI',
         'sv_SE', 'uk_UA', 'vi_VN')}
 
+    @classmethod
+    def lang_code(cls, code: str):
+        """Return language code like "en_US". Try guess, ex "pl" -> "pl_PL"."""
+        if '_' not in code:
+            try:
+                code = cls.DEF_LANG[code]
+            except KeyError:
+                code = f'{code.lower()}_{code.upper()}'
+        return code
+
+
+class Translate(TranslateBase):
+    """Whole translate process handler."""
+
     DEF_PLURAL_FORMS = 'nplurals=2; plural=(n != 1);'
-    PLURAL_FORMS = {
-        'cs_cz': 'nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;',
-        'fr_fr': 'nplurals=2; plural=(n > 1);',
-        'hr_hr': 'nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);',
-        'pl_pl': 'nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);',
-        'ro_ro': 'nplurals=3; plural=(n==1?0:(((n%100>19)||((n%100==0)&&(n!=0)))?2:1));',
-        'tr_tr': 'nplurals=1; plural=0;',
-    }
+    # see
+    # - https://doc.qt.io/archives/qq/qq19-plurals.html
+    # - http://docs.translatehouse.org/projects/localization-guide/en/latest/l10n/pluralforms.html
+    PLURAL_FORMS = {TranslateBase.lang_code(p.code): p.forms for p in plural_forms}
 
     PO_HEADER = """# Kodi Media Center language file
 # Addon Name: {addon}
@@ -93,42 +155,47 @@ msgstr ""
 "X-Generator: KodiTrans {__version__}\n"
 """
 
-    _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
+    # _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
+    _RE_LABEL_NUM = re.compile('#(?P<id>3\d{4,})')
     _RE_READ_PO = re.compile(r'(?:^|\n)(?P<var>(?:msgctxt|msgid|msgstr))[ \t]*'
                              r'(?:[ \t]*[\n]"(?P<val>(?:\.|[^"])*))+"')
     _RE_PO_VAL = re.compile(r'\s*"((?:\.|[^"])*)"')
 
     def __init__(self):
-        self.inputs = []
+        self.inputs: list[Input] = []
         self._by_id: dict[int, Label] = {}
         self._by_text: dict[str, LabelList[Label]] = {}
 
-    def lang_code(self, code: str):
-        """Return language code like "en_US". Try guess, ex "pl" -> "pl_PL"."""
-        if '_' not in code:
-            try:
-                code = self.DEF_LANG[code]
-            except KeyError:
-                code = f'{code.lower()}_{code.upper()}'
-        return code
-
     def _scan(self, tree: etree.Element):
         """Scan single XML."""
-        root = tree.getroot()
-        for node in root.findall('.//*[@label]'):
-            text = node.get('label')
+        def add(text, node):
             if text.isdigit():
                 lid = int(text)
+                if lid < 30000:  # TODO: make option
+                    return
                 label = self._by_id.setdefault(lid, Label(lid))
             else:
                 lst = self._by_text.setdefault(text, LabelList())
                 label = lst.add(Label(None, text))
             label.nodes.add(node)
 
+        root = tree.getroot()
+        for node in chain(root.iterfind('.//heading'), root.iterfind('.//*[@label]')):
+            if node.tag == 'heading':
+                text = node.text
+            else:
+                text = node.get('label')
+            add(text, node)
+        for node in root.iterfind('.//*[@lvalues]'):
+            breakpoint()
+            for i, text in enumerate(node.get('lvalues').split('|')):
+                add(text, NodeLValue(node, index=i))
+
     def load_input(self, path: Union[str, Path]):
         """Load XML and keep data."""
+        path = Path(path)
         tree = etree.parse(str(path))
-        self.inputs.append(tree)
+        self.inputs.append(Input(path, tree))
         self._scan(tree)
         return tree
 
@@ -149,11 +216,17 @@ msgstr ""
                 lst = self._by_text.setdefault(label.text, LabelList())
                 L2 = lst.add(label)
                 if L1 is not L2:
-                    label = Label(L1.id or L2.id, L1.text or L2.text, L1.nodes | L2.nodes)
-                    breakpoint()
-                    ...
-                #     self._by_id[label.id] = label
-                #     self._by_text[label.text] = label
+                    if L2.id is None:
+                        breakpoint()
+                        label = Label(L1.id or L2.id, L1.text or L2.text, L1.nodes | L2.nodes)
+                        ...
+                        #     self._by_id[label.id] = label
+                        #     self._by_text[label.text] = label
+                    else:
+                        assert L1.id is None or L1.id == L2.id
+                        assert L1.text is None or L1.text == L2.text
+                        L2.nodes |= L1.nodes
+                        self._by_id[label.id] = L2
 
     def scan(self):
         """Scan all loaded XML files."""
@@ -181,17 +254,63 @@ msgstr ""
                         best.nodes |= label.nodes
         for label in self._by_id.values():
             for node in label.nodes:
-                node.set('label', str(label.id))
-        for tree in self.inputs:  # XXX
-            etree.dump(tree)
-        # print(lid, len(self._by_id), len(self._by_text))
-        # print()
-        # print([L for LL in self._by_text.values() for L in LL if not L.id])
-        # print([L for L in self._by_id.values() if not L.text])
-        # print([L for LL in self._by_text.values() for L in LL if not L.id and len(L.nodes) > 1])
+                if node.tag == 'heading':
+                    node.text = str(label.id)
+                else:
+                    node.set('label', str(label.id))
+
+    def write(self):
+        for input in self.inputs:
+            self._write_xml(input)
+
+    def _write_xml(self, input):
+        if False:
+            # backup and override
+            input.path.rename(input.path.with_suffix(input.path.suffix + '~'))
+            input.tree.write(input.path)
+        else:
+            # write as new file
+            input.tree.write(input.path.with_suffix(input.path.suffix + '.new'))
 
     def translate(self, lang: str, path: Union[str, Path, None] = None):
-        pass
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        now = local_now()
+        if path.exists():
+            po = polib.pofile(path)
+        else:
+            po = polib.POFile()
+            po.metadata = {
+                'Project-Id-Version': '1.0',
+                'Report-Msgid-Bugs-To': 'dev@kodi-pl.net',
+                'POT-Creation-Date': f'{now:%Y-%m-%d %H:%S%z}',
+                'PO-Revision-Date': f'{now:%Y-%m-%d %H:%S%z}',
+                'Last-Translator': 'KodiPL Team <dev@kodi-pl.net>',
+                # 'Language-Team': 'English <yourteam@example.com>',
+                'Language': lang,
+                'MIME-Version': '1.0',
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Content-Transfer-Encoding': '8bit',
+                'Plural-Forms': self.PLURAL_FORMS.get(lang, self.DEF_PLURAL_FORMS),
+            }
+            po.metadata_args = {
+                'tcomment': 'Kodi Media Center language file',
+                # Addon Name: Unlock Kodi Advanced Settings
+                # Addon id: script.unlock.advancedsettings
+                # Addon Provider: Alex Bratchik
+            }
+        ids = {int(r['id']) for e in po if (r := self._RE_LABEL_NUM.fullmatch(e.msgctxt)) is not None}
+        for label in self._by_id.values():
+            assert label.id is not None
+            if label.id not in ids:
+                entry = polib.POEntry(
+                    msgctxt=f'#{label.id}',
+                    msgid=label.text,
+                    msgstr=label.text,
+                    # occurrences=[('welcome.py', '12'), ('anotherfile.py', '34')]
+                )
+                po.append(entry)
+        po.save(path)
 
 
 def process(inputs, langs=None, output=None, atype=None, remove=False):
@@ -231,6 +350,7 @@ def process(inputs, langs=None, output=None, atype=None, remove=False):
             trans.load_translate(path)
     trans.scan()
     trans.generate()
+    trans.write()
 
     for lang in langs:
         path = output
