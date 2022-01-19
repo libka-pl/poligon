@@ -25,7 +25,7 @@ from plural import plural_forms
 
 
 __author__ = 'rysson'
-__version__ = '0.0.5'
+__version__ = '0.0.6'
 
 
 # Monkey Patching
@@ -83,6 +83,7 @@ class Label:
     text: str = None
     nodes: set[etree.Element] = field(default_factory=set)
     trans: list[Trans] = field(default_factory=list)
+    ref: 'Label' = None
 
 
 class LabelList(list):
@@ -220,7 +221,19 @@ msgstr ""
                 lst[lst.index[L2]] = label
             else:
                 assert L1.id is None or L1.id == L2.id
-                assert not L1.text or L1.text == L2.text
+                if L1.text and L1.text != L2.text:
+                    if (L2 is label or not used) and L1.id is not None:
+                        # text mismatch in the same ID, force to generate new ID (or find another existing)
+                        for lb in lst:
+                            if lb.id is not None and lb.id != L2.id:
+                                L2.id = lb.id
+                                break
+                        else:
+                            L2.id = None  # need to generate new ID
+                            L2.ref = L1
+                            return L2
+                    else:
+                        raise ValueError(f'Label #{L2.id}: text mismatch: {L1.text!r} != {L2.text!r}')
                 L2.nodes |= L1.nodes
                 L2.trans.extend(L1.trans)
                 self._by_id[label.id] = label = L2
@@ -407,10 +420,11 @@ msgstr ""
         if False:
             # backup and override
             input.path.rename(input.path.with_suffix(input.path.suffix + '~'))
-            input.tree.write(input.path)
+            input.tree.write(input.path, encoding='utf-8')
         else:
             # write as new file
-            input.tree.write(input.path.with_suffix(input.path.suffix + '.new'))
+            path = input.path.with_suffix(input.path.suffix + '.new')
+            input.tree.write(path, encoding='utf-8', xml_declaration=True)
 
     def _write_py(self, input):
         if False:
@@ -450,17 +464,21 @@ msgstr ""
                 # Addon id: script.unlock.advancedsettings
                 # Addon Provider: Alex Bratchik
             }
-        ids = {int(r['id']) for e in po if (r := self._RE_LABEL_NUM.fullmatch(e.msgctxt)) is not None}
+        ie = {int(r['id']): e for e in po if (r := self._RE_LABEL_NUM.fullmatch(e.msgctxt)) is not None}
         for label in self._by_id.values():
             assert label.id is not None
-            if label.id not in ids:
+            if label.id not in ie:
                 comment = []
                 if not label.text:
                     comment.append('[empty]')
+                msgstr = ''
+                if label.ref is not None and label.ref.id in ie:
+                    msgstr = ie[label.ref.id].msgstr
                 entry = polib.POEntry(
                     msgctxt=f'#{label.id}',
                     msgid=label.text or f'#{label.id}',
                     # msgstr=label.text or '',
+                    msgstr=msgstr,
                     comment=' '.join(comment),
                     # occurrences=[('welcome.py', '12'), ('anotherfile.py', '34')]
                 )
@@ -522,14 +540,15 @@ def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remov
             if r is not None:
                 langs.add(r.group(1))
 
-    for path in inputs:
-        trans.load_input(path)
     for lang in langs:
         path = output
         if pattern:
             path = output / pattern.format(lang=lang, lang_lower=lang.lower())
         if path.exists():
             trans.load_translate(path)
+
+    for path in inputs:
+        trans.load_input(path)
     trans.scan()
     trans.generate()
     trans.write()
