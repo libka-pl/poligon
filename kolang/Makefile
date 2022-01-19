@@ -1,9 +1,9 @@
 
 VER := $(shell sed -nE  '/^__version__/ { s/^.*=\s*(["'"'"'])(.*)\1.*$$/\2/; p }' kolang/__init__.py)
 
-dist/kolang-$(VER): build/kolang.pyz
+dist/kolang-$(VER).pyz: build/kolang.pyz
 	mkdir -p dist
-	cp build/kolang.pyz dist/kolang-$(VER)
+	cp build/kolang.pyz dist/kolang-$(VER).pyz
 
 build/kolang.pyz: Makefile kolang/__init__.py
 	rm -rf build/kolang

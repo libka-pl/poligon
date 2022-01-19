@@ -23,9 +23,12 @@ except ModuleNotFoundError:
 import polib
 from .plural import plural_forms
 
+from logging import Logger
+logger = Logger('kolang')
+
 
 __author__ = 'rysson'
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 
 # Monkey Patching
@@ -338,7 +341,7 @@ class Translate(TranslateBase):
 
     def load_settings(self, path: Union[str, Path, None] = None):
         path = Path(path or '')
-        return self.load(path / 'resources' / 'settings.xml')
+        return self.load_input(path / 'resources' / 'settings.xml')
 
     def load_translate(self, path: Union[str, Path]):
         """Load XML and keep data."""
@@ -528,7 +531,21 @@ def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remov
             trans.load_translate(path)
 
     for path in inputs:
-        trans.load_input(path)
+        path = Path(path)
+        if path.is_dir():
+            if (path / 'addon.xml').exists():
+                try:
+                    trans.load_settings()
+                except IOError:
+                    logger.info(f'No settring.xml in addon {path}')
+                for p in path.glob('*.py'):
+                    trans.load_input(p)
+                for p in (path / 'resources' / 'lib').glob('**/*.py'):
+                    trans.load_input(p)
+            else:
+                logger.warning(f'It is NOT an addon in {path}')
+        else:
+            trans.load_input(path)
     trans.scan()
     trans.generate()
     trans.write()
@@ -546,10 +563,11 @@ def main(argv=None):
     p.add_argument('--type', choices=('addon', 'skin'), help='add-on folder structure')
     p.add_argument('--translation', '-t', metavar='PATH', action='append', type=Path,
                    help='path string.po or folder with it or to resource folder, default "."')
-    p.add_argument('--language', '-L', metavar='LANG', action='append', help='new language')
+    p.add_argument('--language', '-L', metavar='LANG', action='append',
+                   help='new language like "en", "en_US", "pl"')
     p.add_argument('--mark-translated', action='store_true', help='copy original string to all non-translated entries')
-    p.add_argument('--remove', action='store_true', help='remove unsused translations')
-    p.add_argument('--id-from', type=int, default=30100, help='lowest label ID (start from) [30100]')
+    p.add_argument('--remove', action='store_true', help='remove unsused translations : IGNORED')
+    p.add_argument('--id-from', metavar='NUM', type=int, default=30100, help='lowest label ID (start from) [30100]')
     p.add_argument('--get-localized-string', dest='gls', action='store_true', default=True,
                    help='handle getLocalizedString() [default]')
     p.add_argument('--no-get-localized-string', dest='gls', action='store_false',
@@ -558,9 +576,9 @@ def main(argv=None):
                    help='mark non-used translations as obsoleted [default]')
     p.add_argument('--no-mark-obsoleted', dest='mark_obsoleted', action='store_false',
                    help='ignore non-used translations')
-    p.add_argument('--backup-pattern', default='{}~', help='pattern for backup files [{}~]')
+    p.add_argument('--backup-pattern', metavar='PATTERN', default='{}~', help='pattern for backup files [{}~]')
     p.add_argument('--dry-run', action='store_true', help='do not modify anything')
-    p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path to addon or folder with addons')
+    p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path XML or PY file or addon folder')
     args = p.parse_args(argv)
     # print(args)
     process(args.input, output=args.translation, langs=args.language, remove=args.remove,
