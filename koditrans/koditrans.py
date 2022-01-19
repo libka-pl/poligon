@@ -1,4 +1,10 @@
 # See: https://kodi.wiki/view/Add-on_settings_conversion
+#
+# These IDs are reserved by Kodi:
+# - strings 30000 thru 30999 reserved for plugins and plugin settings
+# - strings 31000 thru 31999 reserved for skins
+# - strings 32000 thru 32999 reserved for scripts
+# - strings 33000 thru 33999 reserved for common strings used in add-ons
 
 import re
 import string
@@ -7,7 +13,6 @@ from collections import namedtuple
 from typing import Union
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from itertools import chain
 import argparse
 try:
     # faster implementation
@@ -20,7 +25,7 @@ from plural import plural_forms
 
 
 __author__ = 'rysson'
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 
 # Monkey Patching
@@ -40,7 +45,13 @@ _real_BaseFile_metadata_as_entry = polib._BaseFile.metadata_as_entry
 polib._BaseFile.metadata_as_entry = _BaseFile_metadata_as_entry
 
 
-Input = namedtuple('Input', 'path tree')
+XmlInput = namedtuple('XmlInput', 'path tree')
+
+
+@dataclass
+class PyInput:
+    path: Path
+    data: str
 
 
 def local_now():
@@ -60,12 +71,18 @@ class SafeFormatter(string.Formatter):
             return '{%s}' % field_name, ()
 
 
+#: Source file (.py) translate info
+Trans = namedtuple('Trans', 'file start end fmt', defaults=('{label.id}',))
+
+
 @dataclass
 class Label:
+    """Single label occurace in xml or py."""
 
     id: int
     text: str = None
     nodes: set[etree.Element] = field(default_factory=set)
+    trans: list[Trans] = field(default_factory=list)
 
 
 class LabelList(list):
@@ -74,12 +91,15 @@ class LabelList(list):
     def add(self, label):
         """Add label in new ID, otherwise merge."""
         for i, lb in enumerate(self):
-            if lb.id == label.id:
+            if lb.id is None and label.id is not None:
+                lb.id = label.id  # still label ID if was None
+            if lb.id == label.id or label.id is None:
                 if lb.text is None and label.text is not None and lb.text:
                     lb.text = label.text
                 elif label.text is not None:
                     assert label.text == lb.text
                 lb.nodes |= label.nodes
+                lb.trans.extend(label.trans)
                 # return i
                 return lb
         self.append(label)
@@ -156,48 +176,151 @@ msgstr ""
 """
 
     # _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
-    _RE_LABEL_NUM = re.compile('#(?P<id>3\d{4,})')
+    _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
     _RE_READ_PO = re.compile(r'(?:^|\n)(?P<var>(?:msgctxt|msgid|msgstr))[ \t]*'
-                             r'(?:[ \t]*[\n]"(?P<val>(?:\.|[^"])*))+"')
-    _RE_PO_VAL = re.compile(r'\s*"((?:\.|[^"])*)"')
+                             r'(?:[ \t]*[\n]"(?P<val>(?:\\.|[^"])*))+"')
+    _RE_PO_VAL = re.compile(r'\s*"((?:\\.|[^"])*)"')
 
     def __init__(self):
-        self.inputs: list[Input] = []
+        self.xml_inputs: list[XmlInput] = []
+        self.py_inputs: list[PyInput] = []
         self._by_id: dict[int, Label] = {}
         self._by_text: dict[str, LabelList[Label]] = {}
+        self.handle_getLocalizedString = True
 
-    def _scan(self, tree: etree.Element):
+    def _add_label(self, label):
+        """Add label to existing data (by ID and by TEXT)."""
+        L1 = L2 = None
+        if label is None:
+            return
+        if label.id is not None:
+            # if lid < 30000:  # TODO: make option
+            #     return
+            L1 = self._by_id.setdefault(label.id, label)
+        if label.text is not None:
+            lst = self._by_text.setdefault(label.text, LabelList())
+            L2 = lst.add(label)
+        if L1 is not None and L2 is not None and L1 is not L2:
+            if L2.id is None:
+                breakpoint()
+                label = Label(L1.id or L2.id, L1.text or L2.text, L1.nodes | L2.nodes, L1.trans + L2.trans)
+                self._by_id[label.id] = label
+                lst[lst.index[L2]] = label
+            else:
+                assert L1.id is None or L1.id == L2.id
+                assert L1.text is None or L1.text == L2.text
+                L2.nodes |= L1.nodes
+                L2.trans.extend(L1.nodes)
+                self._by_id[label.id] = label = L2
+        elif L1 is not None:
+            label = L1
+        elif L2 is not None:
+            label = L2
+        return label
+
+    def _scan_xml(self, tree: etree.Element):
         """Scan single XML."""
         def add(text, node):
             if text.isdigit():
-                lid = int(text)
-                if lid < 30000:  # TODO: make option
-                    return
-                label = self._by_id.setdefault(lid, Label(lid))
+                label = Label(int(text))
             else:
-                lst = self._by_text.setdefault(text, LabelList())
-                label = lst.add(Label(None, text))
-            label.nodes.add(node)
+                label = Label(None, text)
+            if label is not None:
+                label.nodes.add(node)
 
         root = tree.getroot()
-        for node in chain(root.iterfind('.//heading'), root.iterfind('.//*[@label]')):
-            if node.tag == 'heading':
-                text = node.text
-            else:
-                text = node.get('label')
-            add(text, node)
+        for node in root.iterfind('.//heading'):
+            add(node.text, node)
+        for node in root.iterfind('.//*[@label]'):
+            add(node.get('label'), node)
         for node in root.iterfind('.//*[@lvalues]'):
-            breakpoint()
             for i, text in enumerate(node.get('lvalues').split('|')):
                 add(text, NodeLValue(node, index=i))
 
-    def load_input(self, path: Union[str, Path]):
+    def load_xml(self, path: Union[str, Path]):
         """Load XML and keep data."""
         path = Path(path)
         tree = etree.parse(str(path))
-        self.inputs.append(Input(path, tree))
-        self._scan(tree)
+        self.xml_inputs.append(XmlInput(path, tree))
+        self._scan_xml(tree)
         return tree
+
+    def load_py(self, path: Union[str, Path]):
+        """Load strings from Python source and keep data."""
+        def rstr(name='str'):
+            pat = '|'.join((
+                fr'"""(?P<{name}1>(?:\\.|.)*?)"""',   # """..."""
+                fr"'''(?P<{name}2>(?:\\.|.)*?)'''",   # '''...'''
+                fr'"(?P<{name}3>(?:\\.|[^"])*)"',     # "..."
+                fr"'(?P<{name}4>(?:\\.|[^'])*)'",     # '...'
+            ))
+            return f'(?:{pat})'
+
+        def rval(r, name='str'):
+            for i in range(4):
+                if (s := r[f'{name}{i+1}']) is not None:
+                    return s
+
+        def rstart(r, name='str'):
+            for i in range(4):
+                if (s := r.start(f'{name}{i+1}')) != -1:
+                    return s
+
+        with open(path) as f:
+            data = f.read()
+        file = PyInput(path, data)
+        self.py_inputs.append(file)
+
+        _R_CM = r'#\s*(?P<comment>.*)'
+        _R_LL = fr'\b(?P<label>LL?)\s*(?P<label_bracket>\()\s*(?:(?P<mid>\d+)\s*,\s*)?{rstr("msg")}\s*\)'
+        pat = f'{_R_CM}|{rstr()}|{_R_LL}'
+        if self.handle_getLocalizedString:
+            pat += fr'|\bgetLocalizedString\s*\((?P<gls>\s*(?:(?P<gls_id>\d+)|{rstr("gls_text")})\s*)\)'
+        R = re.compile(pat)
+        RS = re.compile(r'\$LOCALIZE\[(?:(?P<id>\d+)|(?P<text>(?:[\\%].|\[(?:[\\%].|[^]])*\]|[^]])+))\]')
+        RS_ESC = re.compile(r'[\\%](.)')
+        for r in R.finditer(data):
+            if r['comment'] is not None:  # skip comments
+                continue
+            label = tr = None
+            s, msg = rval(r), rval(r, 'msg')
+            sstart = rstart(r)
+            if msg is not None:
+                mid = r['mid']
+                if mid is None:
+                    offset = r.end('label_bracket')
+                    tr = Trans(file, start=offset, end=offset, fmt='{label.id}, ')
+                else:
+                    mid = int(mid)
+                    tr = Trans(file, start=r.start('mid'), end=r.end('mid'))
+                label = Label(mid, msg)
+            elif s is not None:
+                for r in RS.finditer(s):
+                    if r['text'] is not None:
+                        mid = r['id']
+                        if mid is not None:
+                            mid = int(mid)
+                        tr = Trans(file, start=sstart + r.start('text'), end=sstart + r.end('text'))
+                        text = RS_ESC.sub(r'\1', r['text'])
+                        label = Label(mid, text)
+            elif r['gls'] is not None:
+                mid = r['gls_id']
+                if mid is None:
+                    tr = Trans(file, start=r.start('gls'), end=r.end('gls'))
+                else:
+                    mid = int(mid)
+                label = Label(mid, rval(r, 'gls_text'))
+            if label is not None:
+                if tr is not None:
+                    label.trans.append(tr)
+                self._add_label(label)
+
+    def load_input(self, path: Union[str, Path]):
+        """Load file (XML / py) and keep data."""
+        path = Path(path)
+        if path.suffix == '.py':
+            return self.load_py(path)
+        return self.load_xml(path)
 
     def load_settings(self, path: Union[str, Path, None] = None):
         path = Path(path or '')
@@ -207,33 +330,19 @@ msgstr ""
         """Load XML and keep data."""
         pofile = polib.pofile(path)
         for entry in pofile:
+            text = entry.msgid
+            if self._RE_LABEL_NUM.fullmatch(text) and '[empty]' in entry.comment:
+                text = None
             if (r := self._RE_LABEL_NUM.fullmatch(entry.msgctxt)) is None:
-                lst = self._by_text.setdefault(entry.msgid, LabelList())
-                lst.add(Label(None, entry.msgid))
+                label = Label(None, entry.msgid)
             else:
                 label = Label(int(r.group(1)), entry.msgid)
-                L1 = self._by_id.setdefault(label.id, label)
-                lst = self._by_text.setdefault(label.text, LabelList())
-                L2 = lst.add(label)
-                if L1 is not L2:
-                    if L2.id is None:
-                        breakpoint()
-                        label = Label(L1.id or L2.id, L1.text or L2.text, L1.nodes | L2.nodes)
-                        ...
-                        #     self._by_id[label.id] = label
-                        #     self._by_text[label.text] = label
-                    else:
-                        assert L1.id is None or L1.id == L2.id
-                        assert L1.text is None or L1.text == L2.text
-                        L2.nodes |= L1.nodes
-                        self._by_id[label.id] = L2
+            self._add_label(label)
 
     def scan(self):
         """Scan all loaded XML files."""
         # 1. translations (strings.po) must be loaded
         # 2. scan current inputs (xml)
-        for tree in self.inputs:
-            pass
         # 3. merge id and text labels
         ...  # TODO: do it
 
@@ -258,10 +367,17 @@ msgstr ""
                     node.text = str(label.id)
                 else:
                     node.set('label', str(label.id))
+        trans = sorted(((label, tr) for label in self._by_id.values() for tr in label.trans),
+                       key=lambda x: -x[1].start)
+        for label, tr in trans:
+            fmt = f'{{before}}{tr.fmt}{{after}}'
+            tr.file.data = fmt.format(before=tr.file.data[:tr.start], after=tr.file.data[tr.end:], label=label)
 
     def write(self):
-        for input in self.inputs:
+        for input in self.xml_inputs:
             self._write_xml(input)
+        for input in self.py_inputs:
+            self._write_py(input)
 
     def _write_xml(self, input):
         if False:
@@ -271,6 +387,17 @@ msgstr ""
         else:
             # write as new file
             input.tree.write(input.path.with_suffix(input.path.suffix + '.new'))
+
+    def _write_py(self, input):
+        if False:
+            # backup and override
+            input.path.rename(input.path.with_suffix(input.path.suffix + '~'))
+            path = input.path
+        else:
+            # write as new file
+            path = input.path.with_suffix(input.path.suffix + '.new')
+        with open(path, 'w') as f:
+            f.write(input.data)
 
     def translate(self, lang: str, path: Union[str, Path, None] = None):
         path = Path(path)
@@ -303,10 +430,14 @@ msgstr ""
         for label in self._by_id.values():
             assert label.id is not None
             if label.id not in ids:
+                comment = []
+                if not label.text:
+                    comment.append('[empty]')
                 entry = polib.POEntry(
                     msgctxt=f'#{label.id}',
-                    msgid=label.text,
-                    msgstr=label.text,
+                    msgid=label.text or f'#{label.id}',
+                    msgstr=label.text or '',
+                    comment=' '.join(comment),
                     # occurrences=[('welcome.py', '12'), ('anotherfile.py', '34')]
                 )
                 po.append(entry)
