@@ -25,7 +25,7 @@ from plural import plural_forms
 
 
 __author__ = 'rysson'
-__version__ = '0.0.3'
+__version__ = '0.0.4'
 
 
 # Monkey Patching
@@ -107,24 +107,29 @@ class LabelList(list):
         return label
 
 
-class NodeLValue:
+class NodeValue:
     """Pseudo xml-node, points to node and one of old select "lvalues"."""
 
-    def __init__(self, node, *, index):
+    def __init__(self, node, attr, *, index=None):
         self.node = node
+        self.attr = attr
         self.index = index
 
     def __getattr__(self, key):
         return getattr(self.node, key)
 
-    def set(self, key, value):
-        assert key == 'label'
-        lst = self.node.get('lvalues', '').split('|')
-        if len(lst) < self.index:
-            lst.append(value)
+    def set_label(self, value):
+        if self.attr is None:
+            self.node.text = value
+        elif self.attr == 'lvalues':
+            lst = self.node.get(self.attr, '').split('|')
+            if len(lst) < self.index:
+                lst.append(value)
+            else:
+                lst[self.index] = value
+            self.node.set(self.attr, '|'.join(lst))
         else:
-            lst[self.index] = value
-        self.node.set('lvalues', '|'.join(lst))
+            self.node.set(self.attr, value)
 
 
 class TranslateBase:
@@ -210,7 +215,7 @@ msgstr ""
                 assert L1.id is None or L1.id == L2.id
                 assert L1.text is None or L1.text == L2.text
                 L2.nodes |= L1.nodes
-                L2.trans.extend(L1.nodes)
+                L2.trans.extend(L1.trans)
                 self._by_id[label.id] = label = L2
         elif L1 is not None:
             label = L1
@@ -227,15 +232,17 @@ msgstr ""
                 label = Label(None, text)
             if label is not None:
                 label.nodes.add(node)
+                self._add_label(label)
 
         root = tree.getroot()
         for node in root.iterfind('.//heading'):
-            add(node.text, node)
-        for node in root.iterfind('.//*[@label]'):
-            add(node.get('label'), node)
+            add(node.text, NodeValue(node, None))
+        for attr in ('label', 'help'):
+            for node in root.iterfind(f'.//*[@{attr}]'):
+                add(node.get(attr), NodeValue(node, attr))
         for node in root.iterfind('.//*[@lvalues]'):
             for i, text in enumerate(node.get('lvalues').split('|')):
-                add(text, NodeLValue(node, index=i))
+                add(text, NodeValue(node, 'lvalues', index=i))
 
     def load_xml(self, path: Union[str, Path]):
         """Load XML and keep data."""
@@ -285,6 +292,7 @@ msgstr ""
             label = tr = None
             s, msg = rval(r), rval(r, 'msg')
             sstart = rstart(r)
+            # L()
             if msg is not None:
                 mid = r['mid']
                 if mid is None:
@@ -294,6 +302,7 @@ msgstr ""
                     mid = int(mid)
                     tr = Trans(file, start=r.start('mid'), end=r.end('mid'))
                 label = Label(mid, msg)
+            # " $LOCALIZE[] "
             elif s is not None:
                 for r in RS.finditer(s):
                     if r['text'] is not None:
@@ -303,6 +312,7 @@ msgstr ""
                         tr = Trans(file, start=sstart + r.start('text'), end=sstart + r.end('text'))
                         text = RS_ESC.sub(r'\1', r['text'])
                         label = Label(mid, text)
+            # getLocalizedString()
             elif r['gls'] is not None:
                 mid = r['gls_id']
                 if mid is None:
@@ -363,10 +373,7 @@ msgstr ""
                         best.nodes |= label.nodes
         for label in self._by_id.values():
             for node in label.nodes:
-                if node.tag == 'heading':
-                    node.text = str(label.id)
-                else:
-                    node.set('label', str(label.id))
+                node.set_label(str(label.id))
         trans = sorted(((label, tr) for label in self._by_id.values() for tr in label.trans),
                        key=lambda x: -x[1].start)
         for label, tr in trans:
@@ -496,7 +503,7 @@ def main(argv=None):
     p.add_argument('--language', '-L', metavar='LANG', action='append', help='new language')
     p.add_argument('--translation', '-t', metavar='PATH', action='append', type=Path,
                    help='path string.po or folder with it or to resource folder, default "."')
-    p.add_argument('--remove', action='store_true', help='remove unsused translations')
+    # p.add_argument('--remove', action='store_true', help='remove unsused translations')
     p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path to addon or folder with addons')
     args = p.parse_args(argv)
     print(args)
