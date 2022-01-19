@@ -21,11 +21,11 @@ except ModuleNotFoundError:
     # standard implementation
     from xml.etree import ElementTree as etree
 import polib
-from plural import plural_forms
+from .plural import plural_forms
 
 
 __author__ = 'rysson'
-__version__ = '0.0.6'
+__version__ = '0.1.0'
 
 
 # Monkey Patching
@@ -161,34 +161,13 @@ class Translate(TranslateBase):
     # - http://docs.translatehouse.org/projects/localization-guide/en/latest/l10n/pluralforms.html
     PLURAL_FORMS = {TranslateBase.lang_code(p.code): p.forms for p in plural_forms}
 
-    PO_HEADER = """# Kodi Media Center language file
-# Addon Name: {addon}
-# Addon id: {id}
-# Addon Provider: {provider}
-msgid ""
-msgstr ""
-"Project-Id-Version: {id}\n"
-"Report-Msgid-Bugs-To: https://github.com/CastagnaIT/plugin.video.netflix\n"
-"POT-Creation-Date: {date}\n"
-"PO-Revision-Date: {date}\n"
-"Last-Translator: {author}\n"
-"Language-Team: {lang_name}\n"
-"Language: {lang}\n"
-"MIME-Version: 1.0\n"
-"Content-Type: text/plain; charset=UTF-8\n"
-"Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: {plural};\n"
-"X-Generator: KodiTrans {__version__}\n"
-"""
-
-    # _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
-    _RE_LABEL_NUM = re.compile('#(?P<id>\d+)')
+    _RE_LABEL_NUM = re.compile(r'#(?P<id>\d+)')
     _RE_READ_PO = re.compile(r'(?:^|\n)(?P<var>(?:msgctxt|msgid|msgstr))[ \t]*'
                              r'(?:[ \t]*[\n]"(?P<val>(?:\\.|[^"])*))+"')
     _RE_PO_VAL = re.compile(r'\s*"((?:\\.|[^"])*)"')
 
     def __init__(self, *, dry_run=False, stats=True, id_from=30100, handle_getLocalizedString=True,
-                 mark_translated=False, mark_obsoleted=True):
+                 mark_translated=False, mark_obsoleted=True, backup_pattern='{}~'):
         self.xml_inputs: list[XmlInput] = []
         self.py_inputs: list[PyInput] = []
         self._ids: set[int] = set()
@@ -200,6 +179,7 @@ msgstr ""
         self.id_from = id_from
         self.mark_translated = mark_translated
         self.mark_obsoleted = mark_obsoleted
+        self.backup_pattern = backup_pattern
 
     def _add_label(self, label, *, used=True):
         """Add label to existing data (by ID and by TEXT)."""
@@ -416,24 +396,24 @@ msgstr ""
         for input in self.py_inputs:
             self._write_py(input)
 
-    def _write_xml(self, input):
-        if False:
-            # backup and override
-            input.path.rename(input.path.with_suffix(input.path.suffix + '~'))
-            input.tree.write(input.path, encoding='utf-8')
-        else:
+    def _write_entry(self, path):
+        if self.backup_pattern == '+':
             # write as new file
-            path = input.path.with_suffix(input.path.suffix + '.new')
-            input.tree.write(path, encoding='utf-8', xml_declaration=True)
+            return path.with_suffix(input.path.suffix + '.new')
+        # backup and override
+        if self.backup_pattern and self.backup_pattern != '{}':
+            bak = Path(self.backup_pattern.format(path.name, path=path, name=path.name, ext=path.suffix[1:]))
+            if not bak.is_relative_to(path.parent):
+                ValueError('Backup path {bak} is outsiede of source {path}')
+            path.rename(bak)
+        return path
+
+    def _write_xml(self, input):
+        path = self._write_entry(input.path)
+        input.tree.write(str(path), encoding='utf-8')
 
     def _write_py(self, input):
-        if False:
-            # backup and override
-            input.path.rename(input.path.with_suffix(input.path.suffix + '~'))
-            path = input.path
-        else:
-            # write as new file
-            path = input.path.with_suffix(input.path.suffix + '.new')
+        path = self._write_entry(input.path)
         with open(path, 'w') as f:
             f.write(input.data)
 
@@ -459,10 +439,10 @@ msgstr ""
                 'Plural-Forms': self.PLURAL_FORMS.get(lang, self.DEF_PLURAL_FORMS),
             }
             po.metadata_args = {
-                'tcomment': 'Kodi Media Center language file',
-                # Addon Name: Unlock Kodi Advanced Settings
-                # Addon id: script.unlock.advancedsettings
-                # Addon Provider: Alex Bratchik
+                'tcomment': ('Kodi Media Center language file'
+                             '\nAddon Name: {addon.name}'
+                             '\nAddon id: {addon.id}'
+                             '\nAddon Provider: {addon.provider}'),
             }
         ie = {int(r['id']): e for e in po if (r := self._RE_LABEL_NUM.fullmatch(e.msgctxt)) is not None}
         for label in self._by_id.values():
@@ -562,6 +542,7 @@ def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remov
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='Translate tool for Kodi XML (like gettext)')
+    p.add_argument('--version', action='version', version=__version__)
     p.add_argument('--type', choices=('addon', 'skin'), help='add-on folder structure')
     p.add_argument('--translation', '-t', metavar='PATH', action='append', type=Path,
                    help='path string.po or folder with it or to resource folder, default "."')
@@ -577,6 +558,7 @@ def main(argv=None):
                    help='mark non-used translations as obsoleted [default]')
     p.add_argument('--no-mark-obsoleted', dest='mark_obsoleted', action='store_false',
                    help='ignore non-used translations')
+    p.add_argument('--backup-pattern', default='{}~', help='pattern for backup files [{}~]')
     p.add_argument('--dry-run', action='store_true', help='do not modify anything')
     p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path to addon or folder with addons')
     args = p.parse_args(argv)
