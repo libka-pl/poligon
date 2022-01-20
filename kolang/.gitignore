@@ -1,0 +1,7 @@
+# Git ignore
+
+*~
+
+/tmp
+/dist
+/build
