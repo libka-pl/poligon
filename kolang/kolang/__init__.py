@@ -407,9 +407,13 @@ class Translate(TranslateBase):
             return path.with_suffix(input.path.suffix + '.new')
         # backup and override
         if self.backup_pattern and self.backup_pattern != '{}':
-            bak = Path(self.backup_pattern.format(path.name, path=path, name=path.name, ext=path.suffix[1:]))
-            if not bak.is_relative_to(path.parent):
-                ValueError('Backup path {bak} is outsiede of source {path}')
+            pat = self.backup_pattern
+            if '/' not in pat and '\\' not in pat:
+                pat = f'{{folder}}/{pat}'
+            bak = Path(pat.format(path.name, path=path, name=path.name, ext=path.suffix[1:],
+                                  directory=path.parent, folder=path.parent))
+            # if not bak.is_relative_to(path.parent):
+            #     ValueError('Backup path {bak} is outsiede of source {path}')
             path.rename(bak)
         return path
 
@@ -496,10 +500,10 @@ class Translate(TranslateBase):
         po.save(path)
 
 
-def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remove=False, id_from=30100, gls=True,
-            mark_translated=False, mark_obsoleted=True):
-    trans = Translate(dry_run=dry_run, id_from=id_from, handle_getLocalizedString=gls,
-                      mark_translated=mark_translated, mark_obsoleted=mark_obsoleted)
+def process(inputs, *, args, langs=None, output=None, atype=None):
+    trans = Translate(dry_run=args.dry_run, id_from=args.id_from, handle_getLocalizedString=args.gls,
+                      mark_translated=args.mark_translated, mark_obsoleted=args.mark_obsoleted,
+                      backup_pattern=args.backup_pattern)
     langs = {trans.lang_code(L) for L in langs or ()}
 
     addon_type = 'resources/language/resource.language.{lang_lower}/strings.po'
@@ -583,9 +587,7 @@ def main(argv=None):
     p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path XML or PY file or addon folder')
     args = p.parse_args(argv)
     # print(args)
-    process(args.input, output=args.translation, langs=args.language, remove=args.remove,
-            id_from=args.id_from, gls=args.gls, dry_run=args.dry_run,
-            mark_translated=args.mark_translated, mark_obsoleted=args.mark_obsoleted)
+    process(args.input, output=args.translation, langs=args.language, args=args)
 
 
 if __name__ == '__main__':
