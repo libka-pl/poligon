@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # See: https://kodi.wiki/view/Add-on_settings_conversion
 #
 # These IDs are reserved by Kodi:
@@ -17,7 +19,7 @@ import argparse
 try:
     # faster implementation
     from lxml import etree
-except ModuleNotFoundError:
+except ImportError:
     # standard implementation
     from xml.etree import ElementTree as etree
 import polib
@@ -28,7 +30,7 @@ logger = Logger('kolang')
 
 
 __author__ = 'rysson'
-__version__ = '0.1.1'
+__version__ = '0.1.2'
 
 
 # Monkey Patching
