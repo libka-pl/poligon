@@ -18,60 +18,99 @@ def file_size(path):
     return path.stat().st_size
 
 
-def convert_icons(root):
-    icon_by_url, icons_by_id = {}, {}
-    for node in root.iterfind('.//icon[@src]'):
-        url, sep, name = node.get('src').rpartition('/')
-        if sep and url:
-            try:
-                iid = icon_by_url[url]
-            except KeyError:
-                # find unique icon id
-                hsh = hash(url)
-                for i in range(4, 8):
-                    iid = f'{abs(hsh):x}'[:i]
-                    if iid not in icons_by_id:
-                        break
-                icon_by_url[url] = iid
-                icons_by_id[iid] = url
-            node.attrib['src'] = f'{{{iid}}}/{name}'
-    if icons_by_id:
-        node = etree.Element('hashes')
-        root.insert(0, node)
-        for iid, url in icons_by_id.items():
-            node.append(etree.Element('icon', id=iid, value=url))
+class Converter:
 
+    OPTIONS = {'lang', 'space', 'icon'}
 
-def convert(path, output, options):
-    parser = etree.XMLParser(remove_blank_text=True)
-    tree = etree.parse(str(path), parser)
-    root = tree.getroot()
-    root.attrib['lang'] = 'pl'
-    # remove lang="pl"
-    if 'lang' in options:
-        for node in root.iterfind('.//*[@lang]'):
+    def __init__(self, path, *, options, output=None):
+        self.path = Path(path)
+        self.options = options
+        if output is None:
+            self.output = self.path.parent / f'{self.path.stem}.new{self.path.suffix}'
+        else:
+            self.output = Path(output)
+        self.tree = self.root = None
+        self.by_value = {}
+        self.by_id = {}
+
+    def load(self):
+        parser = etree.XMLParser(remove_blank_text=True)
+        self.tree = etree.parse(str(self.path), parser)
+        self.root = self.tree.getroot()
+
+    def write(self):
+        pretty_print = 'space' not in self.options
+        self.tree.write(str(self.output), xml_declaration=True, encoding='utf-8', pretty_print=pretty_print)
+
+    def shorcut(self, value):
+        """Get shortcut ID for value."""
+        try:
+            sid = self.by_value[value]
+        except KeyError:
+            # find unique icon id
+            hsh = hash(value)
+            for i in range(4, 8):
+                sid = f'{abs(hsh):x}'[:i]
+                if sid not in self.by_id:
+                    break
+            self.by_value[value] = sid
+            self.by_id[sid] = value
+        return sid
+
+    def add_shortcut_nodes(self):
+        if self.by_id:
+            node = self.root.find('./shortcuts')
+            if node is None:
+                node = etree.Element('shortcuts')
+                self.root.insert(0, node)
+            for sid, value in self.by_id.items():
+                if node.find(f'./*[@id="{sid}"]') is None:
+                    node.append(etree.Element('short', id=sid, value=value))
+
+    def convert_lang(self):
+        self.root.attrib['lang'] = 'pl'
+        for node in self.root.iterfind('.//*[@lang]'):
             if node.get('lang') == 'pl':
                 del node.attrib['lang']
-    if 'icons' in options:
-        convert_icons(root)
-    pretty_print = 'spaces' not in options
-    tree.write(str(output), xml_declaration=True, encoding='utf-8', pretty_print=pretty_print)
+
+    def convert_icon(self):
+        for node in self.root.iterfind('.//icon[@src]'):
+            url, sep, name = node.get('src').rpartition('/')
+            if sep and url:
+                iid = self.shorcut(url)
+                node.attrib['src'] = f'{{{iid}}}/{name}'
+
+    def process(self):
+        if 'lang' in self.options:
+            self.convert_lang()
+        if 'icon' in self.options:
+            self.convert_icon()
+        self.add_shortcut_nodes()
 
 
 def split(s):
-    return [s.strip() for s in s.split(',')]
+    options = {s.strip() for s in s.split(',')}
+    if options - Converter.OPTIONS:
+        msg = 'Unknown converter options: %s' % ', '.join(options - Converter.OPTIONS)
+        import sys  # hack for debug
+        print(msg + '\nAllowed converter options: %s' % ', '.join(Converter.OPTIONS), file=sys.stderr)
+        raise ValueError(msg, 'qwe')
+    return options
 
 
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument('path', metavar='PATH', type=Path, help='path to EPG XML base file')
-    p.add_argument('--output', '-o', metavar='PATH', type=Path, default='out.xml', help='output path')
-    p.add_argument('--convert', '-c', metavar='OPT,[OPT]...', type=split, default=['icons', 'spaces', 'lang'],
+    p.add_argument('--output', '-o', metavar='PATH', type=Path, help='output path')
+    p.add_argument('--convert', '-c', metavar='OPT,[OPT]...', type=split, default=Converter.OPTIONS,
                    help='what to convert: icons, spaces, lang')
     args = p.parse_args(argv)
-    convert(args.path, output=args.output, options=args.convert)
-    size_before = file_size(args.path)
-    size_after = file_size(args.output)
+    converter = Converter(args.path, output=args.output, options=args.convert)
+    converter.load()
+    converter.process()
+    converter.write()
+    size_before = file_size(converter.path)
+    size_after = file_size(converter.output)
     print(f'File is {human_size(size_before - size_after)} smaller ({100 * size_after / (size_before or 1):.0f}%)')
 
 
