@@ -1,6 +1,8 @@
 
 from pathlib import Path
 import argparse
+from datetime import datetime
+from itertools import chain
 from lxml import etree
 
 
@@ -20,7 +22,7 @@ def file_size(path):
 
 class Converter:
 
-    OPTIONS = {'lang', 'space', 'icon'}
+    OPTIONS = {'space', 'lang', 'icon', 'tag', 'timezone', 'category'}
 
     def __init__(self, path, *, options, output=None):
         self.path = Path(path)
@@ -29,7 +31,8 @@ class Converter:
             self.output = self.path.parent / f'{self.path.stem}.new{self.path.suffix}'
         else:
             self.output = Path(output)
-        self.tree = self.root = None
+        self.tree = None
+        self.root: etree.Element = None
         self.by_value = {}
         self.by_id = {}
 
@@ -80,15 +83,55 @@ class Converter:
                 iid = self.shorcut(url)
                 node.attrib['src'] = f'{{{iid}}}/{name}'
 
+    def convert_tag(self):
+        for node in self.root.iterfind('./channel/display-name'):
+            node.tag = 'name'
+        for node in self.root.iterfind('.//programme'):
+            node.tag = 'prog'
+
+    def convert_timezone(self):
+        for node in self.root.iterfind('.//programme'):
+            for attr in ('start', 'stop'):
+                if '+' in (node.get(attr) or ''):
+                    d = datetime.strptime(node.get(attr), '%Y%m%d%H%M%S %z')
+                    d = (d - d.utcoffset()).replace(tzinfo=None)
+                    node.set(attr, f'{d:%Y%m%d%H%M%S})')
+
+    def convert_category(self):
+        categories = {}
+        # for node in self.root.iterfind('.//programme|.//prog'):
+        for node in chain(self.root.iterfind('.//programme'), self.root.iterfind('.//prog')):
+            category = node.find('category')
+            if category is None:
+                name = None
+            else:
+                name = category.text
+                node.remove(category)
+            categories.setdefault(name, []).append(node)
+            self.root.remove(node)
+        for name, nodes in categories.items():
+            category = etree.SubElement(self.root, 'category')
+            if category is not None:
+                category.set('category', name)
+            category.extend(nodes)
+
     def process(self):
         if 'lang' in self.options:
             self.convert_lang()
         if 'icon' in self.options:
             self.convert_icon()
+        if 'timezone' in self.options:
+            self.convert_timezone()
+        if 'tag' in self.options:
+            self.convert_tag()
+        if 'category' in self.options:
+            self.convert_category()
         self.add_shortcut_nodes()
 
 
 def split(s):
+    if not s.strip():
+        return set()
     options = {s.strip() for s in s.split(',')}
     if options - Converter.OPTIONS:
         msg = 'Unknown converter options: %s' % ', '.join(options - Converter.OPTIONS)
