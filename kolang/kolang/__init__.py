@@ -15,6 +15,7 @@ from collections import namedtuple
 from typing import Union
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+import json
 import argparse
 try:
     # faster implementation
@@ -50,13 +51,14 @@ _real_BaseFile_metadata_as_entry = polib._BaseFile.metadata_as_entry
 polib._BaseFile.metadata_as_entry = _BaseFile_metadata_as_entry
 
 
-XmlInput = namedtuple('XmlInput', 'path tree')
+XmlInput = namedtuple('XmlInput', 'path tree base')
 
 
 @dataclass
 class PyInput:
     path: Path
     data: str
+    base: Path
 
 
 def local_now():
@@ -251,15 +253,17 @@ class Translate(TranslateBase):
             for i, text in enumerate(node.get('lvalues').split('|')):
                 add(text, NodeValue(node, 'lvalues', index=i))
 
-    def load_xml(self, path: Union[str, Path]):
+    def load_xml(self, path: Union[str, Path], base: Union[str, Path] = None):
         """Load XML and keep data."""
         path = Path(path)
+        if base is not None:
+            base = Path(base)
         tree = etree.parse(str(path))
-        self.xml_inputs.append(XmlInput(path, tree))
+        self.xml_inputs.append(XmlInput(path, tree, base))
         self._scan_xml(tree)
         return tree
 
-    def load_py(self, path: Union[str, Path]):
+    def load_py(self, path: Union[str, Path], base: Union[str, Path] = None):
         """Load strings from Python source and keep data."""
         def rstr(name='str'):
             pat = '|'.join((
@@ -280,9 +284,11 @@ class Translate(TranslateBase):
                 if (s := r.start(f'{name}{i+1}')) != -1:
                     return s
 
+        if base is not None:
+            base = Path(base)
         with open(path) as f:
             data = f.read()
-        file = PyInput(path, data)
+        file = PyInput(path, data, base)
         self.py_inputs.append(file)
 
         _R_CM = r'#\s*(?P<comment>.*)'
@@ -401,28 +407,37 @@ class Translate(TranslateBase):
         for input in self.py_inputs:
             self._write_py(input)
 
-    def _write_entry(self, path):
+    def _write_entry(self, path, *, base):
         if self.backup_pattern == '+':
             # write as new file
             return path.with_suffix(input.path.suffix + '.new')
         # backup and override
         if self.backup_pattern and self.backup_pattern != '{}':
+            if base is None:
+                base = path.parent
+            else:
+                base = base.resolve()
+            try:
+                relative = path.relative_to(path)
+            except ValueError:
+                relative = Path()
             pat = self.backup_pattern
             if '/' not in pat and '\\' not in pat:
                 pat = f'{{folder}}/{pat}'
             bak = Path(pat.format(path.name, path=path, name=path.name, ext=path.suffix[1:],
-                                  directory=path.parent, folder=path.parent))
+                                  directory=path.parent, folder=path.parent,
+                                  base=base, addon=base, relative=relative))
             # if not bak.is_relative_to(path.parent):
             #     ValueError('Backup path {bak} is outsiede of source {path}')
             path.rename(bak)
         return path
 
     def _write_xml(self, input):
-        path = self._write_entry(input.path)
+        path = self._write_entry(input.path.resolve(), base=input.base)
         input.tree.write(str(path), encoding='utf-8')
 
     def _write_py(self, input):
-        path = self._write_entry(input.path)
+        path = self._write_entry(input.path.resolve(), base=input.base)
         with open(path, 'w') as f:
             f.write(input.data)
 
@@ -499,6 +514,48 @@ class Translate(TranslateBase):
             return
         po.save(path)
 
+    def load_addon_files(self, path):
+        try:
+            self.load_settings()
+        except IOError:
+            logger.info(f'No settring.xml in addon {path}')
+        for p in path.glob('*.py'):
+            self.load_input(p)
+        for p in (path / 'resources' / 'lib').glob('**/*.py'):
+            self.load_input(p)
+
+    def load_addon_config(self, path):
+        with open(path) as f:
+            conf = json.load(f)
+        options = conf.get('options', {})
+        for attr in ('id-from', 'mark-translated', 'mark-obsoleted', 'backup-pattern'):
+            if attr in options:
+                setattr(self, attr.replace('-', '_'), options[attr])
+        if 'get-localized-string' in options:
+            self.handle_getLocalizedString = options['get-localized-string']
+        base = path
+        for source in conf.get('sources', []):
+            if isinstance(source, str):
+                source = {'path': source}
+            path = source.get('path')
+            if path:
+                path = base.parent / Path(path)
+                print(path)
+                if path.is_dir():
+                    print('DIR')
+        raise RuntimeError('!!!')
+        # if not bak.is_relative_to(path.parent):
+        #     ValueError('Backup path {bak} is outsiede of source {path}')
+
+    def load_addon(self, path):
+        if not (path / 'addon.xml').exists():
+            logger.warning('Invalid addon folder {path}, no addon.xml')
+        config_path = path / '.translation.json'
+        if config_path.exists():
+            self.load_addon_config(config_path)
+        else:
+            self.load_addon_files(path)
+
 
 def process(inputs, *, args, langs=None, output=None, atype=None):
     trans = Translate(dry_run=args.dry_run, id_from=args.id_from, handle_getLocalizedString=args.gls,
@@ -506,9 +563,18 @@ def process(inputs, *, args, langs=None, output=None, atype=None):
                       backup_pattern=args.backup_pattern)
     langs = {trans.lang_code(L) for L in langs or ()}
 
+    base = ''
+    if not output:
+        for path in inputs:
+            path = Path(path).resolve()
+            if path.is_dir() and (path / 'addon.xml').exists():
+                base = path
+                logger.info(f'Language storage is in {path}')
+                break
+
     addon_type = 'resources/language/resource.language.{lang_lower}/strings.po'
     skin_type = 'language/resource.language.{lang_lower}/strings.po'
-    output = Path(output or '')
+    output = Path(output or base)
     pattern = ''
     if output.is_dir():
         if atype == 'addon':
@@ -537,19 +603,12 @@ def process(inputs, *, args, langs=None, output=None, atype=None):
             trans.load_translate(path)
 
     for path in inputs:
-        path = Path(path)
+        path = Path(path).resolve()
         if path.is_dir():
             if (path / 'addon.xml').exists():
-                try:
-                    trans.load_settings()
-                except IOError:
-                    logger.info(f'No settring.xml in addon {path}')
-                for p in path.glob('*.py'):
-                    trans.load_input(p)
-                for p in (path / 'resources' / 'lib').glob('**/*.py'):
-                    trans.load_input(p)
+                trans.load_addon(path)
             else:
-                logger.warning(f'It is NOT an addon in {path}')
+                logger.warning(f'There is NOT an addon in {path}, skipping')
         else:
             trans.load_input(path)
     trans.scan()
