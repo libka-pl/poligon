@@ -146,7 +146,7 @@ def main(argv=None):
     p.add_argument('path', metavar='PATH', type=Path, help='path to EPG XML base file')
     p.add_argument('--output', '-o', metavar='PATH', type=Path, help='output path')
     p.add_argument('--convert', '-c', metavar='OPT,[OPT]...', type=split, default=Converter.OPTIONS,
-                   help='what to convert: icons, spaces, lang')
+                   help='what to convert: %s' % ', '.join(Converter.OPTIONS))
     args = p.parse_args(argv)
     converter = Converter(args.path, output=args.output, options=args.convert)
     converter.load()
