@@ -6,6 +6,9 @@ from itertools import chain
 from lxml import etree
 
 
+__version__ = '0.0.1'
+
+
 def human_size(size):
     units = ('B', 'KB', 'MB', 'GB', 'TB')
     for x in units:
@@ -111,7 +114,7 @@ class Converter:
             self.root.remove(node)
         for name, nodes in categories.items():
             category = etree.SubElement(self.root, 'category')
-            if category is not None:
+            if name is not None:
                 category.set('category', name)
             category.extend(nodes)
 
