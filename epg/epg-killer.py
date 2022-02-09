@@ -98,7 +98,7 @@ class Converter:
                 if '+' in (node.get(attr) or ''):
                     d = datetime.strptime(node.get(attr), '%Y%m%d%H%M%S %z')
                     d = (d - d.utcoffset()).replace(tzinfo=None)
-                    node.set(attr, f'{d:%Y%m%d%H%M%S})')
+                    node.set(attr, f'{d:%Y%m%d%H%M%S}')
 
     def convert_category(self):
         categories = {}
