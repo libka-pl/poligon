@@ -27,7 +27,7 @@ class Converter:
 
     OPTIONS = {'space', 'lang', 'icon', 'tag', 'timezone', 'category'}
 
-    def __init__(self, path, *, options, output=None):
+    def __init__(self, path, *, options, output=None, local=None):
         self.path = Path(path)
         self.options = options
         if output is None:
@@ -38,6 +38,11 @@ class Converter:
         self.root: etree.Element = None
         self.by_value = {}
         self.by_id = {}
+        if local is None:
+            t = 86400  # one day (to avoid negative TZ at timestamo 0)
+            self.local = datetime.fromtimestamp(t) - datetime.utcfromtimestamp(t)
+        else:
+            self.local = datetime.strptime(local, '%z').tzinfo.utcoffset()
 
     def load(self):
         parser = etree.XMLParser(remove_blank_text=True)
@@ -95,9 +100,9 @@ class Converter:
     def convert_timezone(self):
         for node in self.root.iterfind('.//programme'):
             for attr in ('start', 'stop'):
-                if '+' in (node.get(attr) or ''):
+                if ' ' in (node.get(attr) or ''):
                     d = datetime.strptime(node.get(attr), '%Y%m%d%H%M%S %z')
-                    d = (d - d.utcoffset()).replace(tzinfo=None)
+                    d = (d - d.utcoffset() + self.local).replace(tzinfo=None)
                     node.set(attr, f'{d:%Y%m%d%H%M%S}')
 
     def convert_category(self):
@@ -150,8 +155,9 @@ def main(argv=None):
     p.add_argument('--output', '-o', metavar='PATH', type=Path, help='output path')
     p.add_argument('--convert', '-c', metavar='OPT,[OPT]...', type=split, default=Converter.OPTIONS,
                    help='what to convert: %s' % ', '.join(Converter.OPTIONS))
+    p.add_argument('--local-timezone', '-t', metavar='TIMEZONE', help='local time zone (ex. +01:00)')
     args = p.parse_args(argv)
-    converter = Converter(args.path, output=args.output, options=args.convert)
+    converter = Converter(args.path, output=args.output, options=args.convert, local=args.local_timezone)
     converter.load()
     converter.process()
     converter.write()
