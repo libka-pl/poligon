@@ -31,7 +31,7 @@ logger = Logger('kolang')
 
 
 __author__ = 'rysson'
-__version__ = '0.1.3'
+__version__ = '0.1.4'
 
 
 # Monkey Patching
@@ -175,7 +175,7 @@ class Translate(TranslateBase):
                              r'(?:[ \t]*[\n]"(?P<val>(?:\\.|[^"])*))+"')
     _RE_PO_VAL = re.compile(r'\s*"((?:\\.|[^"])*)"')
 
-    def __init__(self, *, dry_run=False, stats=True, id_from=30100, handle_getLocalizedString=True,
+    def __init__(self, *, dry_run=False, stats=True, id_from=30100, id_policy='max', handle_getLocalizedString=True,
                  mark_translated=False, mark_obsoleted=True, backup_pattern='{}~'):
         self.xml_inputs: list[XmlInput] = []
         self.py_inputs: list[PyInput] = []
@@ -186,6 +186,7 @@ class Translate(TranslateBase):
         self.stats = stats
         self.handle_getLocalizedString = handle_getLocalizedString
         self.id_from = id_from
+        self.id_policy = id_policy
         self.mark_translated = mark_translated
         self.mark_obsoleted = mark_obsoleted
         self.backup_pattern = backup_pattern
@@ -351,7 +352,9 @@ class Translate(TranslateBase):
         """Load input file / py-dir (XML / py) and keep data."""
         res = None
         path = Path(path)
-        if path.is_dir():
+        if not path.exists():
+            logger.warning('Path does not exist: {!r}, skipping.'.format(str(path)))
+        elif path.is_dir():
             for p in path.glob('**/*.py'):
                 res = self._load_input(p)
         else:
@@ -383,13 +386,25 @@ class Translate(TranslateBase):
         ...  # TODO: do it
 
     def generate(self):
-        """..."""
-        def nextid():
-            nonlocal lidgen
-            lidgen += 1
-            return lidgen
+        """Generate new lables."""
+        if self.id_policy == 'min':
+            def nextid():
+                nonlocal lidgen
+                for n in range(lidgen, 99999):
+                    if n not in self._by_id:
+                        lidgen = n
+                        return n
+                raise ValueError('No new label ID avaliable')
 
-        lidgen = max(self._by_id, default=self.id_from)
+            lidgen = self.id_from
+        else:
+            def nextid():
+                nonlocal lidgen
+                lidgen += 1
+                return lidgen
+
+            lidgen = max(self._by_id, default=self.id_from)
+
         for lst in self._by_text.values():
             for label in lst:
                 if label.id is None:
@@ -411,8 +426,6 @@ class Translate(TranslateBase):
             self._ids.add(label.id)
 
     def write(self):
-        if self.dry_run:
-            return
         for input in self.xml_inputs:
             self._write_xml(input)
         for input in self.py_inputs:
@@ -444,17 +457,26 @@ class Translate(TranslateBase):
         return path
 
     def _write_xml(self, input):
-        path = self._write_entry(input.path.resolve(), base=input.base)
-        input.tree.write(str(path), encoding='utf-8')
+        if self.dry_run:
+            logger.info(f'Write xml: {input.path.resolve()}')
+        else:
+            path = self._write_entry(input.path.resolve(), base=input.base)
+            input.tree.write(str(path), encoding='utf-8')
 
     def _write_py(self, input):
-        path = self._write_entry(input.path.resolve(), base=input.base)
-        with open(path, 'w') as f:
-            f.write(input.data)
+        if self.dry_run:
+            logger.info(f'Write py:  {input.path.resolve()}')
+        else:
+            path = self._write_entry(input.path.resolve(), base=input.base)
+            with open(path, 'w') as f:
+                f.write(input.data)
 
     def translate(self, lang: str, path: Optional[Union[str, Path, None]] = None):
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if self.dry_run:
+            logger.info(f'Make dir:  {path}')
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
         now = local_now()
         if path.exists():
             po = polib.pofile(path)
@@ -520,10 +542,14 @@ class Translate(TranslateBase):
             N = len(po)
             ob = len(set(self._by_id) - self._ids)
             tr = sum(1 for e in po if e.msgstr)
-            print(f'Language {lang}: translated: {100 * tr / (N or 1):.0f}% ({tr}/{N}), obsolete: {ob}')
+            if lang == 'en_GB':  # base language (no translation needed)
+                print(f'Language {lang}: translated: ---- ({tr}/{N}), obsolete: {ob}')
+            else:
+                print(f'Language {lang}: translated: {100 * tr / (N or 1):3.0f}% ({tr}/{N}), obsolete: {ob}')
         if self.dry_run:
-            return
-        po.save(path)
+            logger.info(f'Write po:  {path}')
+        else:
+            po.save(path)
 
     def load_addon_files(self, path):
         try:
@@ -532,7 +558,12 @@ class Translate(TranslateBase):
             logger.info(f'No settring.xml in addon {path!r}')
         for p in path.glob('*.py'):
             self.load_input(p)
-        self.load_input(path / 'resources' / 'lib')
+        for p in (
+            path / 'resources' / 'lib',
+            path / 'lib',
+        ):
+            if p.exists():
+                self.load_input(p)
 
     def load_addon_config(self, path):
         if path.is_dir():
@@ -576,9 +607,10 @@ class Translate(TranslateBase):
 
 
 def process(inputs, *, args, langs=None, output=None, atype=None):
-    trans = Translate(dry_run=args.dry_run, id_from=args.id_from, handle_getLocalizedString=args.gls,
+    trans = Translate(dry_run=args.dry_run, id_from=args.id_from, id_policy=args.id_policy,
+                      handle_getLocalizedString=args.gls, backup_pattern=args.backup_pattern,
                       mark_translated=args.mark_translated, mark_obsoleted=args.mark_obsoleted,
-                      backup_pattern=args.backup_pattern)
+                      )
     langs = {trans.lang_code(L) for L in langs or ()}
     base = ''
     conf = None
@@ -608,7 +640,9 @@ def process(inputs, *, args, langs=None, output=None, atype=None):
             elif (output / 'resources' / 'language').is_dir():
                 pattern = addon_type
             else:
-                pattern = 'resource.language.{lang_lower}/strings.po'
+                # pattern = 'resource.language.{lang_lower}/strings.po'
+                logger.info("Unsure addon type, guess it's plugin/module")
+                pattern = addon_type
         for lpath in output.glob(pattern.replace('{lang_lower}', '*')):
             lpath = lpath.resolve()
             pat = re.escape(pattern.replace('{lang_lower}', '__LANG__')).replace('__LANG__', '(.*?)').replace('/', r'[/\\]')
@@ -638,11 +672,20 @@ def process(inputs, *, args, langs=None, output=None, atype=None):
     trans.generate()
     trans.write()
 
-    for lang in langs:
+    for lang in sorted(langs):
         path = output
         if pattern:
             path = output / pattern.format(lang=lang, lang_lower=lang.lower())
         trans.translate(lang, path)
+
+
+def lang_type(ss):
+    rlang = re.compile(r'[a-z]{2,3}(?:_[a-zA-Z]{2})?')
+    ss = [s.strip() for s in ss.split(',') if s.strip()]
+    for s in ss:
+        if not rlang.fullmatch(s):
+            raise ValueError(f'Unknown language fomrat {s!r}')
+    return ss
 
 
 def main(argv=None):
@@ -651,11 +694,12 @@ def main(argv=None):
     p.add_argument('--type', choices=('addon', 'skin'), help='add-on folder structure')
     p.add_argument('--translation', '-t', metavar='PATH', action='append', type=Path,
                    help='path string.po or folder with it or to resource folder, default "."')
-    p.add_argument('--language', '-L', metavar='LANG', action='append',
+    p.add_argument('--language', '-L', metavar='LANG', action='extend', type=lang_type,
                    help='new language like "en", "en_US", "pl"')
     p.add_argument('--mark-translated', action='store_true', help='copy original string to all non-translated entries')
     p.add_argument('--remove', action='store_true', help='remove unsused translations : IGNORED')
     p.add_argument('--id-from', metavar='NUM', type=int, default=30100, help='lowest label ID (start from) [30100]')
+    p.add_argument('--id-policy', choices=('max', 'min'), default='max', help='new label ID policy [max]')
     p.add_argument('--get-localized-string', dest='gls', action='store_true', default=True,
                    help='handle getLocalizedString() [default]')
     p.add_argument('--no-get-localized-string', dest='gls', action='store_false',
