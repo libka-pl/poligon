@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # See: https://kodi.wiki/view/Add-on_settings_conversion
 #
 # These IDs are reserved by Kodi:
@@ -10,14 +12,15 @@ import re
 import string
 from dataclasses import dataclass, field
 from collections import namedtuple
-from typing import Union
+from typing import Union, Optional
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+import json
 import argparse
 try:
     # faster implementation
     from lxml import etree
-except ModuleNotFoundError:
+except ImportError:
     # standard implementation
     from xml.etree import ElementTree as etree
 import polib
@@ -28,7 +31,7 @@ logger = Logger('kolang')
 
 
 __author__ = 'rysson'
-__version__ = '0.1.1'
+__version__ = '0.1.4'
 
 
 # Monkey Patching
@@ -48,13 +51,16 @@ _real_BaseFile_metadata_as_entry = polib._BaseFile.metadata_as_entry
 polib._BaseFile.metadata_as_entry = _BaseFile_metadata_as_entry
 
 
-XmlInput = namedtuple('XmlInput', 'path tree')
+AddonConf = namedtuple('AddonConf', 'paths langs')
+
+XmlInput = namedtuple('XmlInput', 'path tree base')
 
 
 @dataclass
 class PyInput:
     path: Path
     data: str
+    base: Path
 
 
 def local_now():
@@ -169,7 +175,7 @@ class Translate(TranslateBase):
                              r'(?:[ \t]*[\n]"(?P<val>(?:\\.|[^"])*))+"')
     _RE_PO_VAL = re.compile(r'\s*"((?:\\.|[^"])*)"')
 
-    def __init__(self, *, dry_run=False, stats=True, id_from=30100, handle_getLocalizedString=True,
+    def __init__(self, *, dry_run=False, stats=True, id_from=30100, id_policy='max', handle_getLocalizedString=True,
                  mark_translated=False, mark_obsoleted=True, backup_pattern='{}~'):
         self.xml_inputs: list[XmlInput] = []
         self.py_inputs: list[PyInput] = []
@@ -180,6 +186,7 @@ class Translate(TranslateBase):
         self.stats = stats
         self.handle_getLocalizedString = handle_getLocalizedString
         self.id_from = id_from
+        self.id_policy = id_policy
         self.mark_translated = mark_translated
         self.mark_obsoleted = mark_obsoleted
         self.backup_pattern = backup_pattern
@@ -198,7 +205,6 @@ class Translate(TranslateBase):
             L2 = lst.add(label)
         if L1 is not None and L2 is not None and L1 is not L2:
             if L2.id is None:
-                breakpoint()
                 label = Label(L1.id or L2.id, L1.text or L2.text, L1.nodes | L2.nodes, L1.trans + L2.trans)
                 self._by_id[label.id] = label
                 lst[lst.index[L2]] = label
@@ -249,15 +255,17 @@ class Translate(TranslateBase):
             for i, text in enumerate(node.get('lvalues').split('|')):
                 add(text, NodeValue(node, 'lvalues', index=i))
 
-    def load_xml(self, path: Union[str, Path]):
+    def load_xml(self, path: Union[str, Path], base: Optional[Union[str, Path]] = None):
         """Load XML and keep data."""
         path = Path(path)
+        if base is not None:
+            base = Path(base)
         tree = etree.parse(str(path))
-        self.xml_inputs.append(XmlInput(path, tree))
+        self.xml_inputs.append(XmlInput(path, tree, base))
         self._scan_xml(tree)
         return tree
 
-    def load_py(self, path: Union[str, Path]):
+    def load_py(self, path: Union[str, Path], base: Optional[Union[str, Path]] = None):
         """Load strings from Python source and keep data."""
         def rstr(name='str'):
             pat = '|'.join((
@@ -278,9 +286,11 @@ class Translate(TranslateBase):
                 if (s := r.start(f'{name}{i+1}')) != -1:
                     return s
 
+        if base is not None:
+            base = Path(base)
         with open(path) as f:
             data = f.read()
-        file = PyInput(path, data)
+        file = PyInput(path, data, base)
         self.py_inputs.append(file)
 
         _R_CM = r'#\s*(?P<comment>.*)'
@@ -332,14 +342,26 @@ class Translate(TranslateBase):
                     label.trans.append(tr)
                 self._add_label(label)
 
-    def load_input(self, path: Union[str, Path]):
-        """Load file (XML / py) and keep data."""
-        path = Path(path)
+    def _load_input(self, path: Path):
+        """Load single file (XML / py) and keep data."""
         if path.suffix == '.py':
             return self.load_py(path)
         return self.load_xml(path)
 
-    def load_settings(self, path: Union[str, Path, None] = None):
+    def load_input(self, path: Union[str, Path]):
+        """Load input file / py-dir (XML / py) and keep data."""
+        res = None
+        path = Path(path)
+        if not path.exists():
+            logger.warning('Path does not exist: {!r}, skipping.'.format(str(path)))
+        elif path.is_dir():
+            for p in path.glob('**/*.py'):
+                res = self._load_input(p)
+        else:
+            res = self._load_input(path)
+        return res
+
+    def load_settings(self, path: Optional[Union[str, Path, None]] = None):
         path = Path(path or '')
         return self.load_input(path / 'resources' / 'settings.xml')
 
@@ -364,13 +386,25 @@ class Translate(TranslateBase):
         ...  # TODO: do it
 
     def generate(self):
-        """..."""
-        def nextid():
-            nonlocal lidgen
-            lidgen += 1
-            return lidgen
+        """Generate new lables."""
+        if self.id_policy == 'min':
+            def nextid():
+                nonlocal lidgen
+                for n in range(lidgen, 99999):
+                    if n not in self._by_id:
+                        lidgen = n
+                        return n
+                raise ValueError('No new label ID avaliable')
 
-        lidgen = max(self._by_id, default=self.id_from)
+            lidgen = self.id_from
+        else:
+            def nextid():
+                nonlocal lidgen
+                lidgen += 1
+                return lidgen
+
+            lidgen = max(self._by_id, default=self.id_from)
+
         for lst in self._by_text.values():
             for label in lst:
                 if label.id is None:
@@ -392,37 +426,57 @@ class Translate(TranslateBase):
             self._ids.add(label.id)
 
     def write(self):
-        if self.dry_run:
-            return
         for input in self.xml_inputs:
             self._write_xml(input)
         for input in self.py_inputs:
             self._write_py(input)
 
-    def _write_entry(self, path):
+    def _write_entry(self, path, *, base):
         if self.backup_pattern == '+':
             # write as new file
             return path.with_suffix(input.path.suffix + '.new')
         # backup and override
         if self.backup_pattern and self.backup_pattern != '{}':
-            bak = Path(self.backup_pattern.format(path.name, path=path, name=path.name, ext=path.suffix[1:]))
-            if not bak.is_relative_to(path.parent):
-                ValueError('Backup path {bak} is outsiede of source {path}')
+            if base is None:
+                base = path.parent
+            else:
+                base = base.resolve()
+            try:
+                relative = path.relative_to(path)
+            except ValueError:
+                relative = Path()
+            pat = self.backup_pattern
+            if '/' not in pat and '\\' not in pat:
+                pat = f'{{folder}}/{pat}'
+            bak = Path(pat.format(path.name, path=path, name=path.name, ext=path.suffix[1:],
+                                  directory=path.parent, folder=path.parent,
+                                  base=base, addon=base, relative=relative))
+            # if not bak.is_relative_to(path.parent):
+            #     ValueError('Backup path {bak} is outsiede of source {path}')
             path.rename(bak)
         return path
 
     def _write_xml(self, input):
-        path = self._write_entry(input.path)
-        input.tree.write(str(path), encoding='utf-8')
+        if self.dry_run:
+            logger.info(f'Write xml: {input.path.resolve()}')
+        else:
+            path = self._write_entry(input.path.resolve(), base=input.base)
+            input.tree.write(str(path), encoding='utf-8')
 
     def _write_py(self, input):
-        path = self._write_entry(input.path)
-        with open(path, 'w') as f:
-            f.write(input.data)
+        if self.dry_run:
+            logger.info(f'Write py:  {input.path.resolve()}')
+        else:
+            path = self._write_entry(input.path.resolve(), base=input.base)
+            with open(path, 'w') as f:
+                f.write(input.data)
 
-    def translate(self, lang: str, path: Union[str, Path, None] = None):
+    def translate(self, lang: str, path: Optional[Union[str, Path, None]] = None):
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if self.dry_run:
+            logger.info(f'Make dir:  {path}')
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
         now = local_now()
         if path.exists():
             po = polib.pofile(path)
@@ -488,21 +542,92 @@ class Translate(TranslateBase):
             N = len(po)
             ob = len(set(self._by_id) - self._ids)
             tr = sum(1 for e in po if e.msgstr)
-            print(f'Language {lang}: translated: {100 * tr / (N or 1):.0f}% ({tr}/{N}), obsolete: {ob}')
+            if lang == 'en_GB':  # base language (no translation needed)
+                print(f'Language {lang}: translated: ---- ({tr}/{N}), obsolete: {ob}')
+            else:
+                print(f'Language {lang}: translated: {100 * tr / (N or 1):3.0f}% ({tr}/{N}), obsolete: {ob}')
         if self.dry_run:
-            return
-        po.save(path)
+            logger.info(f'Write po:  {path}')
+        else:
+            po.save(path)
+
+    def load_addon_files(self, path):
+        try:
+            self.load_settings()
+        except IOError:
+            logger.info(f'No settring.xml in addon {path!r}')
+        for p in path.glob('*.py'):
+            self.load_input(p)
+        for p in (
+            path / 'resources' / 'lib',
+            path / 'lib',
+        ):
+            if p.exists():
+                self.load_input(p)
+
+    def load_addon_config(self, path):
+        if path.is_dir():
+            path = path / '.translation.json'
+            if not path.exists():
+                return None
+        with open(path) as f:
+            conf = json.load(f)
+        options = conf.get('options', {})
+        for attr in ('id-from', 'mark-translated', 'mark-obsoleted', 'backup-pattern'):
+            if attr in options:
+                setattr(self, attr.replace('-', '_'), options[attr])
+        if 'get-localized-string' in options:
+            self.handle_getLocalizedString = options['get-localized-string']
+        base = path
+        paths = []
+        for source in conf.get('sources', []):
+            if isinstance(source, str):
+                source = {'path': source}
+            path = source.get('path')
+            if path:
+                path = base.parent / Path(path)
+                if path.exists():
+                    paths.append(path)
+                else:
+                    logger.warning(f'Source {path!r} does not exist')
+        langs = {self.lang_code(L) for L in conf.get('languages', ())}
+        return AddonConf(paths=paths, langs=langs)
+        # if not bak.is_relative_to(path.parent):
+        #     ValueError('Backup path {bak} is outsiede of source {path}')
+
+    def load_addon(self, path):
+        if not (path / 'addon.xml').exists():
+            logger.warning(f'Invalid addon folder {path!r}, no addon.xml')
+        conf = self.load_addon_config(path)
+        if conf:
+            for p in conf.paths:
+                self.load_input(p)
+        else:
+            self.load_addon_files(path)
 
 
-def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remove=False, id_from=30100, gls=True,
-            mark_translated=False, mark_obsoleted=True):
-    trans = Translate(dry_run=dry_run, id_from=id_from, handle_getLocalizedString=gls,
-                      mark_translated=mark_translated, mark_obsoleted=mark_obsoleted)
+def process(inputs, *, args, langs=None, output=None, atype=None):
+    trans = Translate(dry_run=args.dry_run, id_from=args.id_from, id_policy=args.id_policy,
+                      handle_getLocalizedString=args.gls, backup_pattern=args.backup_pattern,
+                      mark_translated=args.mark_translated, mark_obsoleted=args.mark_obsoleted,
+                      )
     langs = {trans.lang_code(L) for L in langs or ()}
+    base = ''
+    conf = None
+    if not output:
+        for path in inputs:
+            path = Path(path).resolve()
+            if path.is_dir() and (path / 'addon.xml').exists():
+                base = path
+                conf = trans.load_addon_config(path)
+                if conf:
+                    langs |= conf.langs
+                logger.info(f'Language storage is in {path}')
+                break
 
     addon_type = 'resources/language/resource.language.{lang_lower}/strings.po'
     skin_type = 'language/resource.language.{lang_lower}/strings.po'
-    output = Path(output or '')
+    output = Path(output or base)
     pattern = ''
     if output.is_dir():
         if atype == 'addon':
@@ -515,13 +640,17 @@ def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remov
             elif (output / 'resources' / 'language').is_dir():
                 pattern = addon_type
             else:
-                pattern = 'resource.language.{lang_lower}/strings.po'
+                # pattern = 'resource.language.{lang_lower}/strings.po'
+                logger.info("Unsure addon type, guess it's plugin/module")
+                pattern = addon_type
         for lpath in output.glob(pattern.replace('{lang_lower}', '*')):
             lpath = lpath.resolve()
             pat = re.escape(pattern.replace('{lang_lower}', '__LANG__')).replace('__LANG__', '(.*?)').replace('/', r'[/\\]')
             r = re.fullmatch(fr'.*[/\\]{pat}', str(lpath))
             if r is not None:
-                langs.add(r.group(1))
+                L = r.group(1)
+                L, sep, C = L.partition('_')
+                langs.add(f'{L}{sep}{C.upper()}')
 
     for lang in langs:
         path = output
@@ -531,30 +660,32 @@ def process(inputs, *, langs=None, output=None, atype=None, dry_run=False, remov
             trans.load_translate(path)
 
     for path in inputs:
-        path = Path(path)
+        path = Path(path).resolve()
         if path.is_dir():
             if (path / 'addon.xml').exists():
-                try:
-                    trans.load_settings()
-                except IOError:
-                    logger.info(f'No settring.xml in addon {path}')
-                for p in path.glob('*.py'):
-                    trans.load_input(p)
-                for p in (path / 'resources' / 'lib').glob('**/*.py'):
-                    trans.load_input(p)
+                trans.load_addon(path)
             else:
-                logger.warning(f'It is NOT an addon in {path}')
+                logger.warning(f'There is NOT an addon in {path}, skipping')
         else:
             trans.load_input(path)
     trans.scan()
     trans.generate()
     trans.write()
 
-    for lang in langs:
+    for lang in sorted(langs):
         path = output
         if pattern:
             path = output / pattern.format(lang=lang, lang_lower=lang.lower())
         trans.translate(lang, path)
+
+
+def lang_type(ss):
+    rlang = re.compile(r'[a-z]{2,3}(?:_[a-zA-Z]{2})?')
+    ss = [s.strip() for s in ss.split(',') if s.strip()]
+    for s in ss:
+        if not rlang.fullmatch(s):
+            raise ValueError(f'Unknown language fomrat {s!r}')
+    return ss
 
 
 def main(argv=None):
@@ -563,11 +694,12 @@ def main(argv=None):
     p.add_argument('--type', choices=('addon', 'skin'), help='add-on folder structure')
     p.add_argument('--translation', '-t', metavar='PATH', action='append', type=Path,
                    help='path string.po or folder with it or to resource folder, default "."')
-    p.add_argument('--language', '-L', metavar='LANG', action='append',
+    p.add_argument('--language', '-L', metavar='LANG', action='extend', type=lang_type,
                    help='new language like "en", "en_US", "pl"')
     p.add_argument('--mark-translated', action='store_true', help='copy original string to all non-translated entries')
     p.add_argument('--remove', action='store_true', help='remove unsused translations : IGNORED')
     p.add_argument('--id-from', metavar='NUM', type=int, default=30100, help='lowest label ID (start from) [30100]')
+    p.add_argument('--id-policy', choices=('max', 'min'), default='max', help='new label ID policy [max]')
     p.add_argument('--get-localized-string', dest='gls', action='store_true', default=True,
                    help='handle getLocalizedString() [default]')
     p.add_argument('--no-get-localized-string', dest='gls', action='store_false',
@@ -581,9 +713,7 @@ def main(argv=None):
     p.add_argument('input', metavar='PATH', nargs='+', type=Path, help='path XML or PY file or addon folder')
     args = p.parse_args(argv)
     # print(args)
-    process(args.input, output=args.translation, langs=args.language, remove=args.remove,
-            id_from=args.id_from, gls=args.gls, dry_run=args.dry_run,
-            mark_translated=args.mark_translated, mark_obsoleted=args.mark_obsoleted)
+    process(args.input, output=args.translation, langs=args.language, args=args)
 
 
 if __name__ == '__main__':
