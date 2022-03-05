@@ -16,7 +16,7 @@ def main(argv: list[str] = None):
     repo_parser(repo)
 
     args = parser.parse_args(argv)
-    print(args)
+    # print(args)
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     if args.command == 'repo':
         repo_run(args)
