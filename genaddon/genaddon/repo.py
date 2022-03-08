@@ -47,7 +47,7 @@ class Repo:
                 self.old[addon.id] = addon.version
 
     def filter(self):
-        """Filter addons, to remove older verisons."""
+        """Filter addons, to remove older versions."""
         addons = {}
         for aname, versions in self.keys.items():
             versions = sorted(versions, key=LooseVersion)
@@ -143,7 +143,7 @@ class Addon:
         else:
             apath.mkdir(parents=True, exist_ok=True)
             if not force and zpath.exists():
-                logger.info(f'Package {zpath} already exists, skipping...')
+                logger.info(f'Package {zpath} already exists.')
             else:
                 with ZipFile(zpath, 'w') as azip:
                     for path in self.path.glob('**/*'):
@@ -153,13 +153,19 @@ class Addon:
                             else:
                                 azip.write(path, aid / path.relative_to(self.path))
                 self.packed = True
-        for fname in ('icon.png', 'fanart.jpg'):
-            path = self.path / fname
-            if path.exists():
-                if dry_run:
-                    logger.debug(f' - update file {apath / fname}')
-                else:
-                    copy2(path, apath / fname)
+        # for fname in ('icon.png', 'fanart.jpg'):
+        for xpath in ('./extension/assets/icon', './extension/assets/fanart'):
+            node = self.root.find(xpath)
+            if node is not None and node.text:
+                fname = node.text
+                path = self.path / fname
+                if path.exists():
+                    if dry_run:
+                        logger.debug(f' - update file {apath / fname}')
+                    else:
+                        dest = apath / fname
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        copy2(path, dest)
 
 
 def scan(*, repo: Repo, pool: Path, ignore: List[str] = None):
@@ -178,7 +184,8 @@ def scan(*, repo: Repo, pool: Path, ignore: List[str] = None):
                 logger.error(f'Invalid archive {path}, has no {name}/addon.xml')
 
 
-def generate(*paths, repo: Repo, pool: Path, ignore: List[str] = None, dry_run: bool = False):
+def generate(*paths, repo: Repo, pool: Path, ignore: List[str] = None, dry_run: bool = False,
+             force: bool = False):
     """
     Gnerate repo <addons/> node from all given paths.
     Path point to addon or foler with addons.
@@ -186,12 +193,12 @@ def generate(*paths, repo: Repo, pool: Path, ignore: List[str] = None, dry_run: 
     for path in paths:
         path = Path(path)
         if (addon := Addon(path, ignore=ignore)).is_valid():
-            addon.pack(pool, dry_run=dry_run)
+            addon.pack(pool, dry_run=dry_run, force=force)
             repo.append(addon)
         else:
             for p in path.iterdir():
                 if (addon := Addon(p, ignore=ignore)).is_valid():
-                    addon.pack(pool, dry_run=dry_run)
+                    addon.pack(pool, dry_run=dry_run, force=force)
                     repo.append(addon)
     return repo
 
@@ -214,10 +221,10 @@ def process(*paths, pool: Union[str, Path] = None, output: Union[str, Path], sig
     repo = Repo()
     if update:
         scan(repo=repo, pool=pool)
-    generate(*paths, repo=repo, pool=pool, dry_run=dry_run)
+    generate(*paths, repo=repo, pool=pool, dry_run=dry_run, force=force)
     new_addons = repo.filter()
     if not force and new_addons == repo.old and all(not a.packed for a in repo.addons):
-        logger.info('Nothing changed in repo, skipping...')
+        logger.info('Nothing changed in repo, skipping.')
         return
     if dry_run:
         logger.info(f'Write {output}')
@@ -244,15 +251,14 @@ def arg_parser(parser: ArgumentParser = None):
     """Main entry."""
     if parser is None:
         parser = ArgumentParser(description='Kodi repo ganerator')
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument('--pool', '-p', default='pool', help='path to pool folder (with addons.xml and zips)')
-    group.add_argument('--output', '-o', default='addons.xml', help='output addons.xml file')
+    parser.add_argument('--pool', '-p', default='pool', help='path to pool folder (with addons.xml and zips)')
+    parser.add_argument('--output', '-o', default='addons.xml', help='output addons.xml file')
     parser.add_argument('--update', '-u', action='store_true', help='update existing repo pool')
     parser.add_argument('--signature', '-s', action='append', choices=('sha512', 'sha256', 'sha1', 'md5'),
                         help='signature hash type [sha256]')
-    group.add_argument('--force', '-f', action='store_true', help='Force regenerate zip packages')
-    group.add_argument('--ignore', '-i', action='append', help='Pattern to ignore file [.git*]')
-    group.add_argument('--kodi-version', '-k', default='19', help='Kodi version [19]')
+    parser.add_argument('--force', '-f', action='store_true', help='Force regenerate zip packages')
+    parser.add_argument('--ignore', '-i', action='append', help='Pattern to ignore file [.git*]')
+    parser.add_argument('--kodi-version', '-k', default='19', help='Kodi version [19]')
     parser.add_argument('path', metavar='PATH', nargs='+', help='path to addon or folder with addons')
     return parser
 
