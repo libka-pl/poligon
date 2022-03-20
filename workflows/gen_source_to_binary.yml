@@ -1,0 +1,64 @@
+# 
+# Generuje Zipy i robi commit do repozytorium 
+# robi kolejny commit zipów  do drugiego g³ównego  repo
+# 1 zadanie z przeniesieniem artefaktów miêdzy zadaniami
+# wymaga SECRET wygenerowany w github
+
+name: MatrixZips
+
+# Wyzwalanie  na push pliku addon.xml  do ga³êzi main
+# (podniesienie wersji)
+on:
+  push:
+    branches:    
+      - 'main'
+    paths:
+      - 'matrix/*/addon.xml'
+      
+jobs:
+      build:
+        env:
+           commitmsg: ${{ github.event.head_commit.message }} # ostatni commit-message  
+        runs-on: ubuntu-latest
+    
+        steps:
+          - name: checkout content
+            uses: actions/checkout@v2 # checkout the repository content to github runner.
+          - name: setup python
+            uses: actions/setup-python@v2
+            with:
+              python-version: 3.8 #install the python needed
+          - name: make zips
+#      uruchamianie skryptu generatora python 
+#      Mój tworzy folder zips a w nich ju¿ foldery z binarkami i pliki addons.xml i addons.xml.md5
+            run: |
+              cd matrix
+              python repo_generator.py
+          - name: commit to repo
+# commit wyników do repo Ÿród³owego - testy
+            run: |
+              git config --local user.email "github_action@github.com"
+              git config --local user.name "GitHub Action Bot"
+              git add ./matrix/zips
+              git commit -m "Automatyczne generowanie zipów do repo"
+          - name: Push changes
+            uses: ad-m/github-push-action@master
+            with:
+              github_token: ${{ secrets.UPLOAD }}
+# Transfer do drugiego repo
+          - name: Pushes to another repository
+            id: push_directory
+            uses: cpina/github-action-push-to-another-repository@main
+            env:
+              API_TOKEN_GITHUB: ${{ secrets.UPLOAD }}       # utworzony secret - dostêp do repo 
+            with:
+              source-directory: matrix/zips/                # w repo Ÿród³owym
+              target-directory: source/                     # w repo docelowym
+              destination-github-username: 'lantash77'      # u¿ytkownik repo docelowego
+              destination-repository-name: 'lantash-repo'   # nazwa repo docelowego
+              user-email: github-actions@github.com
+              user-name: 'autobot'                          # autor commitu
+              commit-message: ${{ env.commitmsg }}          # commit-message                
+              target-branch: main
+          - name: Test get variable exported by push-to-another-repository
+            run: echo $DESTINATION_CLONED_DIRECTORY
