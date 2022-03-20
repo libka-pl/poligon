@@ -1,0 +1,73 @@
+# 
+# Generuje Zipy i robi commit do drugiego głównego  repo
+# 2 jobs z przeniesieniem artefaktów między zadaniami
+# wymaga SECRET wygenerowany w github
+#
+
+name: MatrixZips
+
+# Controls when the action will run. Workflow runs when manually triggered using the UI
+# or API.
+on:
+  push:
+    branches:    
+      - 'main'
+    paths:
+      - 'matrix/*/addon.xml'        
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+    build:
+        runs-on: ubuntu-latest
+    
+        steps:
+          - name: checkout content
+            uses: actions/checkout@v2 # checkout the repository content to github runner.
+          - name: setup python
+            uses: actions/setup-python@v2
+            with:
+              python-version: 3.8 #install the python needed
+          - name: make zips # run the run.py to get the latest data
+            run: |
+              cd matrix
+              python repo_generator.py
+          - name: Upload results
+            uses: actions/upload-artifact@v3
+            with:
+             name: binary
+             path: matrix/zips/*
+    transfer:
+        name: Download-artifacts
+        needs: build
+        runs-on: ubuntu-latest
+        steps:
+          - name: Download files
+            uses: actions/download-artifact@v3
+            with:
+              name: binary
+              path: zipy/
+          - name: Pushes to another repository
+            id: push_directory
+            uses: cpina/github-action-push-to-another-repository@main
+            env:
+              API_TOKEN_GITHUB: ${{ secrets.UPLOAD }}
+            with:
+              source-directory: zipy/
+              target-directory: source/zips
+              destination-github-username: 'lantash77'
+              destination-repository-name: 'lantash-repo'
+              user-email: github-actions@github.com
+              user-name: 'autobot'
+              commit-message: See ORIGIN_COMMIT from $GITHUB_REF
+              commit-descritotion : Dupa
+              target-branch: main
+          - name: Test get variable exported by push-to-another-repository
+            run: echo $DESTINATION_CLONED_DIRECTORY
+
+         
+
+        
+          
+            
+            
+      
