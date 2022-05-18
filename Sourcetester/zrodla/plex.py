@@ -77,7 +77,6 @@ class source:
                     server['address'] = device.find('./Connection[@local="0"]').get('address')
                     server['port'] = device.find('./Connection[@local="0"]').get('port')
                     server['uri'] = device.find('./Connection[@local="0"]').get('uri')
-                    server['local'] = device.find('./Connection[@local="0"]').get('local')
                     servers.append(server)
                 except:
                     continue
