@@ -47,7 +47,23 @@ def thread_it_multi(function, delay: int, *args: list, **kwargs: dict[str, list]
     th = [Worker(target=function, args=arg[:A],
                  kwargs=dict(zip(kwargs, arg[A:]))) for arg in args_tr]
 
-
+#    args_trans_position = list(zip(*args))
+#    #kwargs transposition
+#    kwargs_collect = [[{key: k} for k in kwargs[key]]
+#                      for key in kwargs.keys()]
+#    kwarg_list = []
+#    kwargs_transposition = list(zip(*kwargs_collect))
+#    for tup in kwargs_transposition:
+#        kw_dic = {}
+#        [kw_dic.update(i) for i in tup]
+#        kwarg_list.append(kw_dic)
+#
+#    #threads list build up
+#    th = []
+#    for arg in args_trans_position:
+#        th.append(Worker(target=function, args=arg,
+#                         kwargs=(kwarg_list[args_trans_position.index(arg)]
+#                                 if kwargs else None)))
     for t in th:
         t.start()
         time.sleep(delay)
