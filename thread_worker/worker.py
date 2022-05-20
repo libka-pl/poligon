@@ -71,17 +71,26 @@ def thread_it_multi(function, delay: int, *args: list, **kwargs: dict[str, list]
     return [i.join() for i in th]
 
 
-def thread_it(function):
+def thread_it(output=False):
     """
     thread_it decorator
     Carefull not killing threads.
     """
-    def inner(*args, **kwargs):
+    def wrapper(function):
+        def inner(*args, **kwargs):
 
-        th = Worker(target=function, args=args,
-                    kwargs=kwargs)
-        th.start()
-        #th.join()
-    return inner
+            th = Worker(target=function, args=args,
+                        kwargs=kwargs)
+
+            if not output:
+                th.start()
+                return
+            elif output == 'thread':
+                return th
+            elif output == True:
+                th.start()
+                return th.join()
+        return inner
+    return wrapper
 
 
