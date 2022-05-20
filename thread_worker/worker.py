@@ -4,7 +4,7 @@ import time
 class Worker(Thread):
     def __init__(self, group=None, target=None, name=None,
                  args=(), kwargs={}):
-        super().__init__(self, group, target, name, args, kwargs)
+        Thread.__init__(self, group, target, name, args, kwargs)
         self._return = None
     def run(self):        
         if self._target is not None:
