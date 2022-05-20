@@ -1,14 +1,12 @@
 from threading import Thread
 import time
 
-
 class Worker(Thread):
     def __init__(self, group=None, target=None, name=None,
                  args=(), kwargs={}):
-        Thread.__init__(self, group, target, name, args, kwargs)
+        super().__init__(self, group, target, name, args, kwargs)
         self._return = None
-    def run(self):
-        #print(type(self._target))
+    def run(self):        
         if self._target is not None:
             self._return = self._target(*self._args,
                                         **self._kwargs)
@@ -39,6 +37,8 @@ def thread_it_multi(function, delay: int, *args: list, **kwargs: dict[str, list]
     delay  must be provided - 0 if no delay required ]
     List of args and kwargs must be same lenght !
     args and kwargs are transpositioned before preparing threads to start
+
+    Credits to rysson for advice
     """
 
     #args transposition
@@ -47,41 +47,28 @@ def thread_it_multi(function, delay: int, *args: list, **kwargs: dict[str, list]
     th = [Worker(target=function, args=arg[:A],
                  kwargs=dict(zip(kwargs, arg[A:]))) for arg in args_tr]
 
-#    args_trans_position = list(zip(*args))
-#    #kwargs transposition
-#    kwargs_collect = [[{key: k} for k in kwargs[key]]
-#                      for key in kwargs.keys()]
-#    kwarg_list = []
-#    kwargs_transposition = list(zip(*kwargs_collect))
-#    for tup in kwargs_transposition:
-#        kw_dic = {}
-#        [kw_dic.update(i) for i in tup]
-#        kwarg_list.append(kw_dic)
-#
-#    #threads list build up
-#    th = []
-#    for arg in args_trans_position:
-#        th.append(Worker(target=function, args=arg,
-#                         kwargs=(kwarg_list[args_trans_position.index(arg)]
-#                                 if kwargs else None)))
+
     for t in th:
         t.start()
-        time.sleep(delay)
-    # return result
+        time.sleep(delay)    
     return [i.join() for i in th]
 
 
 def thread_it(output=False):
     """
     thread_it decorator
-    Carefull not killing threads.
+
+    :param output: optional [False, 'thread', True]
+    When no output arg provided - Runs function in background and continue main script
+    :return:  if output = True - starting function in thread and return value
+    :return:  if output = thread - returns thread worker for further handle
+
     """
     def wrapper(function):
         def inner(*args, **kwargs):
 
             th = Worker(target=function, args=args,
                         kwargs=kwargs)
-
             if not output:
                 th.start()
                 return
