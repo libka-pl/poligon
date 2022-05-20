@@ -63,6 +63,24 @@ def thread_it(output=False):
     :return:  if output = True - starting function in thread and return value
     :return:  if output = thread - returns thread worker for further handle
 
+    ex.1
+    @thread_it(thread)
+    def foo(x):
+        time.sleep(1)   # long time work
+        return x**2
+
+    workers = [foo(x) for x in range(10)]
+    results = [w.join() for w in workers]
+
+    ex.2
+    @thread_it
+    def bar(y):
+        ...
+        #do smth with y
+        return y + 15
+
+    result = bar(y)
+
     """
     def wrapper(function):
         def inner(*args, **kwargs):
