@@ -54,17 +54,17 @@ def thread_it_multi(function, delay: int, *args: list, **kwargs: dict[str, list]
     return [i.join() for i in th]
 
 
-def thread_it(output=False):
+def thread_it(start=True):
     """
     thread_it decorator
 
     :param output: optional [False, 'thread', True]
     When no output arg provided - Runs function in background and continue main script
-    :return:  if output = True - starting function in thread and return value
-    :return:  if output = thread - returns thread worker for further handle
+    worker is returned for optional further handling
+    :return:  if output = True - returns thread worker for further handle
 
     ex.1
-    @thread_it(thread)
+    @thread_it(True)
     def foo(x):
         time.sleep(1)   # long time work
         return x**2
@@ -72,13 +72,15 @@ def thread_it(output=False):
     workers = [foo(x) for x in range(10)]
     results = [w.join() for w in workers]
 
-    ex.2
+    ex.2 - notice that no brackets are necessary
     @thread_it
     def bar(y):
         ...
         #do smth with y
         return y + 15
 
+    bar(y)
+    or
     result = bar(y)
 
     """
@@ -87,15 +89,16 @@ def thread_it(output=False):
 
             th = Worker(target=function, args=args,
                         kwargs=kwargs)
-            if not output:
+
+            if start:
                 th.start()
-                return
-            elif output == 'thread':
                 return th
-            elif output == True:
-                th.start()
-                return th.join()
+            return th
+
         return inner
+    if callable(start):
+        func, start = start, True
+        return wrapper(func)
     return wrapper
 
 
