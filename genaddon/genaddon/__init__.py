@@ -4,4 +4,4 @@ from logging import Logger
 logger = Logger('genaddon')
 
 __author__ = 'rysson'
-__version__ = '0.1.3'
+__version__ = '0.1.4'
